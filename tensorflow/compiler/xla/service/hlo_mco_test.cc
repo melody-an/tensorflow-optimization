@@ -190,12 +190,14 @@ main{
   %A = f32[40,20]{1,0} parameter(0), parameter_replication={false}, metadata={op_name="XLA_Args"}
   %B = f32[20,30]{1,0} parameter(1), parameter_replication={false}, metadata={op_name="XLA_Args"}
   %dot1 = f32[40,30]{1,0} dot(f32[40,20]{1,0} %A, f32[20,30]{1,0} %B), lhs_contracting_dims={1}, rhs_contracting_dims={0}, metadata={op_type="MatMul" op_name="matmul"}
-  %C = f32[30]{0} parameter(2), parameter_replication={false}, metadata={op_name="XLA_Args"}
-  %dot2 = f32[40]{0} dot(f32[40,30]{1,0} %dot1, f32[30]{0} %C), lhs_contracting_dims={1}, rhs_contracting_dims={0}, metadata={op_type="Einsum" op_name="einsum/Einsum"}
-  %D = f32[40]{0} parameter(3), parameter_replication={false}, metadata={op_name="XLA_Args"}
-  %dot3 = f32[] dot(f32[40]{0} %dot2, f32[40]{0} %D), lhs_contracting_dims={0}, rhs_contracting_dims={0}, metadata={op_type="Einsum" op_name="einsum_1/Einsum"}
-  %E = f32[] parameter(4), parameter_replication={false}, metadata={op_name="XLA_Args"}
-  ROOT %add1 = f32[] add(f32[] %dot3, f32[] %E), metadata={op_type="AddV2" op_name="add"}
+  %C = f32[30,10]{1,0} parameter(2), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %dot4 = f32[40,10]{1,0} dot(f32[40,30]{1,0} %dot1, f32[30,10]{1,0} %C), lhs_contracting_dims={1}, rhs_contracting_dims={0}, metadata={op_type="MatMul" op_name="matmul"}
+  %D = f32[10]{0} parameter(3), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %dot2 = f32[40]{0} dot(f32[40,10]{1,0} %dot4, f32[10]{0} %D), lhs_contracting_dims={1}, rhs_contracting_dims={0}, metadata={op_type="Einsum" op_name="einsum/Einsum"}
+  %E = f32[40]{0} parameter(4), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %dot3 = f32[] dot(f32[40]{0} %dot2, f32[40]{0} %E), lhs_contracting_dims={0}, rhs_contracting_dims={0}, metadata={op_type="Einsum" op_name="einsum_1/Einsum"}
+  %F = f32[] parameter(5), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  ROOT %add1 = f32[] add(f32[] %dot3, f32[] %F), metadata={op_type="AddV2" op_name="add"}
 }
 )";
 
@@ -218,7 +220,7 @@ main{
   DumpToFileInDirImpl(dir, absl::StrFormat("%s.dot", filename),
                       render_graph(RenderedGraphFormat::kDot));
   HloMCO pass;
-  ASSERT_FALSE(pass.Run(m.get()).ValueOrDie());
+  ASSERT_TRUE(pass.Run(m.get()).ValueOrDie());
 
   HloInstruction* root = m->entry_computation()->root_instruction();
   printf("After opotimization:\n %f\n", m->ToString().c_str());

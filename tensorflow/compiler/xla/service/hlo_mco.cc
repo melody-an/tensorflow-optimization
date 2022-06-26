@@ -280,9 +280,9 @@ Status MatrixChainDetector::Preprocess(HloInstruction* hlo) {
   DebugPrint("MatrixChainDetector::Preprocess",
              "inst.name:" + hlo->name() +
                  " opcode = " + HloOpcodeString(hlo->opcode()));
-  // skip dot op but if the root_instruction is a dot, then it must be the root
+  // skip 2D dot op but if it is the root_instruction, then it must be the root
   // of a matrix chain
-  if (hlo->opcode() == HloOpcode::kDot) {
+  if (hlo->opcode() == HloOpcode::kDot && hlo->shape().dimensions_size() == 2) {
     if (hlo != hlo->parent()->root_instruction()) {
       return Status::OK();
     } else {
@@ -314,7 +314,6 @@ Status MatrixChainDetector::Preprocess(HloInstruction* hlo) {
           dnums.lhs_batch_dimensions_size() != 0 ||
           dnums.rhs_batch_dimensions_size() != 0 ||
           op->shape().dimensions_size() != 2) {
-            // 要不然就是只考虑纯2D的整个chain，要不然就是遇到这种情况，看他的operand里有没有可以优化的chain
         VLOG(10)
             << "[MatrixChainDetector]: Can only optimize 2D, non-batch dot "
                "operations.";
