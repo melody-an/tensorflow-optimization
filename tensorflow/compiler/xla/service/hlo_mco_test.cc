@@ -2,6 +2,8 @@
 
 #include "absl/strings/string_view.h"
 #include "tensorflow/compiler/xla/literal_util.h"
+#include "tensorflow/compiler/xla/service/hlo_cse.h"
+#include "tensorflow/compiler/xla/service/hlo_dce.h"
 #include "tensorflow/compiler/xla/service/hlo_graph_dumper.h"
 #include "tensorflow/compiler/xla/shape_util.h"
 #include "tensorflow/compiler/xla/tests/hlo_test_base.h"
@@ -78,7 +80,10 @@ main{
                       render_graph(RenderedGraphFormat::kDot));
   HloMCO pass;
   ASSERT_TRUE(pass.Run(m.get()).ValueOrDie());
-
+  HloDCE dce;
+  RunHloPass(&dce, m.get());
+  HloCSE cse(/*is_layout_sensitive=*/false);
+  cse.Run(m.get()).ValueOrDie();
   HloInstruction* root = m->entry_computation()->root_instruction();
   printf("After opotimization:\n %f\n", m->ToString().c_str());
 
@@ -124,7 +129,10 @@ main{
                       render_graph(RenderedGraphFormat::kDot));
   HloMCO pass;
   ASSERT_TRUE(pass.Run(m.get()).ValueOrDie());
-
+  HloDCE dce;
+  RunHloPass(&dce, m.get());
+  HloCSE cse(/*is_layout_sensitive=*/false);
+  cse.Run(m.get()).ValueOrDie();
   HloInstruction* root = m->entry_computation()->root_instruction();
   printf("After opotimization:\n %f\n", m->ToString().c_str());
 
@@ -172,7 +180,10 @@ main{
                       render_graph(RenderedGraphFormat::kDot));
   HloMCO pass;
   ASSERT_TRUE(pass.Run(m.get()).ValueOrDie());
-
+  HloDCE dce;
+  RunHloPass(&dce, m.get());
+  HloCSE cse(/*is_layout_sensitive=*/false);
+  cse.Run(m.get()).ValueOrDie();
   HloInstruction* root = m->entry_computation()->root_instruction();
   printf("After opotimization:\n %f\n", m->ToString().c_str());
 
@@ -221,7 +232,120 @@ main{
                       render_graph(RenderedGraphFormat::kDot));
   HloMCO pass;
   ASSERT_TRUE(pass.Run(m.get()).ValueOrDie());
+  HloDCE dce;
+  RunHloPass(&dce, m.get());
+  HloCSE cse(/*is_layout_sensitive=*/false);
+  cse.Run(m.get()).ValueOrDie();
+  HloInstruction* root = m->entry_computation()->root_instruction();
+  printf("After opotimization:\n %f\n", m->ToString().c_str());
 
+  filename = TestName() + "_after_opotimization";
+  std::cout << "Start Dumping " << filename << " to " << dir;
+  DumpToFileInDirImpl(dir, absl::StrFormat("%s.dot", filename),
+                      render_graph(RenderedGraphFormat::kDot));
+}
+
+TEST_F(HloMCOTest, ReusedSameSubMatrixAfterOptimizationChain) {
+  // Test opotimization in graph which contain a matrix cahin as a subgraph
+  // and a sub-chain of the graph is reused, but after optimization the sub-chain result doesn't change
+  auto builder = HloComputation::Builder(TestName());
+  const std::string hlo_text = R"(
+HloModule ReusedSameSubMatrixAfterOptimizationChain
+main{
+  %A = f32[40,20]{1,0} parameter(0)
+  %B = f32[20,30]{1,0} parameter(1)
+  %dot1 = f32[40,30]{1,0} dot(f32[40,20]{1,0} %A, f32[20,30]{1,0} %B), lhs_contracting_dims={1}, rhs_contracting_dims={0}
+  %C = f32[30,10]{1,0} parameter(2), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %dot2 = f32[40,10]{1,0} dot(f32[40,30]{1,0} %dot1, f32[30,10]{1,0} %C), lhs_contracting_dims={1}, rhs_contracting_dims={0}
+  %D = f32[10,30]{1,0} parameter(3)
+  %dot3 = f32[40,30]{1,0} dot(f32[40,10]{1,0} %dot2, f32[10,30]{1,0} %D), lhs_contracting_dims={1}, rhs_contracting_dims={0}
+  %E = f32[10,30]{1,0} parameter(4)
+  %dot4 = f32[40,30]{1,0} dot(f32[40,10]{1,0} %dot2, f32[10,30]{1,0} %E), lhs_contracting_dims={1}, rhs_contracting_dims={0}
+  %F = f32[40,30]{1,0} parameter(5)
+  %add1 = f32[40,30] add(%F, %dot4)
+  ROOT %add2 = f32[40,30] add(%dot3, %add1)
+}
+)";
+
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> m,
+                          ParseAndReturnVerifiedModule(hlo_text));
+  std::string dir = "/vol/bitbucket/ya321/codes/MscProject/test_output/";
+  std::string filename = TestName() + "_before_opotimization";
+  // DebugOptions debug_options
+  auto render_graph = [&](RenderedGraphFormat format) {
+    StatusOr<string> rendered_graph =
+        RenderGraph(*m->entry_computation(),
+                    /*label=*/filename, m->config().debug_options(), format);
+    if (rendered_graph.ok()) {
+      return std::move(rendered_graph).ValueOrDie();
+    }
+    return absl::StrFormat("Error rendering graph: %s",
+                           rendered_graph.status().ToString());
+  };
+  std::cout << "Start Dumping " << filename << " to " << dir;
+  DumpToFileInDirImpl(dir, absl::StrFormat("%s.dot", filename),
+                      render_graph(RenderedGraphFormat::kDot));
+  HloMCO pass;
+  ASSERT_TRUE(pass.Run(m.get()).ValueOrDie());
+  HloDCE dce;
+  RunHloPass(&dce, m.get());
+  HloCSE cse(/*is_layout_sensitive=*/false);
+  cse.Run(m.get()).ValueOrDie();
+  HloInstruction* root = m->entry_computation()->root_instruction();
+  printf("After opotimization:\n %f\n", m->ToString().c_str());
+
+  filename = TestName() + "_after_opotimization";
+  std::cout << "Start Dumping " << filename << " to " << dir;
+  DumpToFileInDirImpl(dir, absl::StrFormat("%s.dot", filename),
+                      render_graph(RenderedGraphFormat::kDot));
+}
+
+TEST_F(HloMCOTest, ReusedDiffSubMatrixAfterOptimizationChain) {
+  // Test opotimization in graph which contain a matrix cahin as a subgraph
+  // and a sub-chain of the graph is reused, but after optimization the sub-chain result change
+  auto builder = HloComputation::Builder(TestName());
+  const std::string hlo_text = R"(
+HloModule ReusedDiffSubMatrixAfterOptimizationChain
+main{
+  %A = f32[40,20]{1,0} parameter(0)
+  %B = f32[20,30]{1,0} parameter(1)
+  %dot1 = f32[40,30]{1,0} dot(f32[40,20]{1,0} %A, f32[20,30]{1,0} %B), lhs_contracting_dims={1}, rhs_contracting_dims={0}
+  %C = f32[30,10]{1,0} parameter(2), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %dot2 = f32[40,10]{1,0} dot(f32[40,30]{1,0} %dot1, f32[30,10]{1,0} %C), lhs_contracting_dims={1}, rhs_contracting_dims={0}
+  %D = f32[10,30]{1,0} parameter(3)
+  %dot3 = f32[40,30]{1,0} dot(f32[40,10]{1,0} %dot2, f32[10,30]{1,0} %D), lhs_contracting_dims={1}, rhs_contracting_dims={0}
+  %E = f32[30,30]{1,0} parameter(4)
+  %dot4 = f32[40,30]{1,0} dot(f32[40,30]{1,0} %dot1, f32[30,30]{1,0} %E), lhs_contracting_dims={1}, rhs_contracting_dims={0}
+  %F = f32[40,30]{1,0} parameter(5)
+  %add1 = f32[40,30] add(%F, %dot4)
+  ROOT %add2 = f32[40,30] add(%dot3, %add1)
+}
+)";
+
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> m,
+                          ParseAndReturnVerifiedModule(hlo_text));
+  std::string dir = "/vol/bitbucket/ya321/codes/MscProject/test_output/";
+  std::string filename = TestName() + "_before_opotimization";
+  // DebugOptions debug_options
+  auto render_graph = [&](RenderedGraphFormat format) {
+    StatusOr<string> rendered_graph =
+        RenderGraph(*m->entry_computation(),
+                    /*label=*/filename, m->config().debug_options(), format);
+    if (rendered_graph.ok()) {
+      return std::move(rendered_graph).ValueOrDie();
+    }
+    return absl::StrFormat("Error rendering graph: %s",
+                           rendered_graph.status().ToString());
+  };
+  std::cout << "Start Dumping " << filename << " to " << dir;
+  DumpToFileInDirImpl(dir, absl::StrFormat("%s.dot", filename),
+                      render_graph(RenderedGraphFormat::kDot));
+  HloMCO pass;
+  ASSERT_TRUE(pass.Run(m.get()).ValueOrDie());
+  HloDCE dce;
+  RunHloPass(&dce, m.get());
+  HloCSE cse(/*is_layout_sensitive=*/false);
+  cse.Run(m.get()).ValueOrDie();
   HloInstruction* root = m->entry_computation()->root_instruction();
   printf("After opotimization:\n %f\n", m->ToString().c_str());
 

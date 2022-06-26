@@ -27,8 +27,7 @@ class HloMCO : public HloModulePass {
   StatusOr<bool> ChainOptimize(
       HloComputation* computation,
       absl::flat_hash_map<HloInstruction*, std::vector<HloInstruction*>>&
-          chain_map,
-      std::vector<HloInstruction*> need_to_be_removed_instructions);
+          chain_map);
   static StatusOr<HloInstruction*> CopyResuableSubgraph(HloInstruction* inst);
   StatusOr<HloInstruction*> ComputeOptimalChainOrder(
       HloInstruction* root, std::vector<HloInstruction*>& chain);
@@ -87,15 +86,11 @@ class ChainRecorder : public DfsHloVisitorWithDefault {
     chain_map.erase(root);
     return Status::OK();
   }
-  std::vector<HloInstruction*>& GetToBeRemovedInstructions() {
-    return need_to_be_removed_instructions;
-  }
 
  private:
   // Each kv pair is (chain_root_ptr, vector<chain_instruction_ptr>)
   absl::flat_hash_map<HloInstruction*, std::vector<HloInstruction*>> chain_map;
   HloInstruction* chain_root;
-  std::vector<HloInstruction*> need_to_be_removed_instructions;
 };
 
 class MatrixChainDetector : public DfsHloVisitorWithDefault {
@@ -117,20 +112,10 @@ class MatrixChainDetector : public DfsHloVisitorWithDefault {
 
   Status FinishVisit(HloInstruction* hlo) override { return Status::OK(); }
   Status DetectMatrixChain(HloInstruction* chain_root);
-  std::vector<HloInstruction*>& GetToBeRemovedInstructions() {
-    return need_to_be_removed_instructions;
-  }
-
-  Status InsertToBeRemovedInstructions(std::vector<HloInstruction*>& vec) {
-    need_to_be_removed_instructions.insert(need_to_be_removed_instructions.end(),
-                                        vec.begin(), vec.end());
-    return Status::OK();
-  }
 
  private:
   // Each kv pair is (chain_root_ptr, vector<chain_instruction_ptr>)
   absl::flat_hash_map<HloInstruction*, std::vector<HloInstruction*>> chain_map;
-  std::vector<HloInstruction*> need_to_be_removed_instructions;
 };
 
 }  // namespace xla

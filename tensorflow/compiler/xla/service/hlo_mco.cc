@@ -167,9 +167,27 @@ static StatusOr<std::deque<HloInstruction*>> DetectMatrixChainPreorderDFS(
             " users.size = " + std::to_string(current_node->users().size()));
     if (current_node != root && current_node->users().size() > 1) {
       // for reused sub matrix chain, need to copy
-      auto status_or = HloMCO::CopyResuableSubgraph(current_node);
-      HloInstruction* new_chain = std::move(status_or).ValueOrDie();
-      new_chain_roots.emplace_back(new_chain);
+      // TODO: 在这里打印下原版和clone的name以及user数量等信息
+      // DebugPrint(
+      //     "DetectMatrixChainPreorderDFS",
+      //     "need copy current_node = " + current_node->name() +
+      //         " opcode = " + HloOpcodeString(current_node->opcode()) +
+      //         " users.size = " +
+      //         std::to_string(current_node->users().size()));
+      // auto status_or = HloMCO::CopyResuableSubgraph(current_node);
+      // HloInstruction* new_chain = std::move(status_or).ValueOrDie();
+      // DebugPrint(
+      //     "DetectMatrixChainPreorderDFS",
+      //     "after copy current_node = " + current_node->name() +
+      //         " opcode = " + HloOpcodeString(current_node->opcode()) +
+      //         " users.size = " +
+      //         std::to_string(current_node->users().size()));
+      // DebugPrint(
+      //     "DetectMatrixChainPreorderDFS",
+      //     "after copy new_chain_root = " + new_chain->name() +
+      //         " opcode = " + HloOpcodeString(new_chain->opcode()) +
+      //         " users.size = " + std::to_string(new_chain->users().size()));
+      // new_chain_roots.emplace_back(new_chain);
     }
 
     const size_t old_dfs_stack_size = dfs_stack.size();
@@ -221,7 +239,6 @@ Status ChainRecorder::Preprocess(HloInstruction* hlo) {
                    " chain_map[" + chain_root->name() +
                    "].size = " + std::to_string(chain_map[chain_root].size()));
   } else {
-    need_to_be_removed_instructions.emplace_back(hlo);
     DebugPrint("ChainRecorder::Preprocess",
                "Skip dot node: " + hlo->name() +
                    " opcode = " + HloOpcodeString(hlo->opcode()));
@@ -252,25 +269,15 @@ Status MatrixChainDetector::DetectMatrixChain(HloInstruction* chain_root) {
     DebugPrint("MatrixChainDetector::MatrixChainDetector",
                "After insert chain_roots.size() = " +
                    std::to_string(chain_roots.size()));
-    if (chain_recorder.GetChainLength(cur_root) < 3) {
-      // Single dot operation doesn't need optimize
-      chain_recorder.RemoveChain(cur_root);
-      DebugPrint("MatrixChainDetector::MatrixChainDetector",
-                 "Remove single dot op: " + cur_root->name());
-    } else {
-      auto chain = chain_recorder.GetChain(cur_root);
-      DebugPrint("MatrixChainDetector::MatrixChainDetector",
-                 "Before insert chain_map.size() = " +
-                     std::to_string(chain_map.size()));
-      chain_map.insert({cur_root, chain});
-      need_to_be_removed_instructions.insert(
-          need_to_be_removed_instructions.end(),
-          chain_recorder.GetToBeRemovedInstructions().begin(),
-          chain_recorder.GetToBeRemovedInstructions().end());
-      DebugPrint("MatrixChainDetector::MatrixChainDetector",
-                 "After insert chain_map.size() = " +
-                     std::to_string(chain_map.size()));
-    }
+
+    auto chain = chain_recorder.GetChain(cur_root);
+    DebugPrint(
+        "MatrixChainDetector::MatrixChainDetector",
+        "Before insert chain_map.size() = " + std::to_string(chain_map.size()));
+    chain_map.insert({cur_root, chain});
+    DebugPrint(
+        "MatrixChainDetector::MatrixChainDetector",
+        "After insert chain_map.size() = " + std::to_string(chain_map.size()));
   }
   DebugPrint("MatrixChainDetector::MatrixChainDetector",
              "Finished chain_map.size() = " + std::to_string(chain_map.size()));
@@ -317,7 +324,8 @@ Status MatrixChainDetector::Preprocess(HloInstruction* hlo) {
         VLOG(10)
             << "[MatrixChainDetector]: Can only optimize 2D, non-batch dot "
                "operations.";
-        DebugPrint("MatrixChainDetector::Preprocess", "Can only optimize 2D non-batch dot operations.");
+        DebugPrint("MatrixChainDetector::Preprocess",
+                   "Can only optimize 2D non-batch dot operations.");
         continue;
       }
       // current node != kDot, child op = kDot, child op is the root of a matrix
@@ -338,6 +346,10 @@ Status MatrixChainDetector::Preprocess(HloInstruction* hlo) {
 
 StatusOr<HloInstruction*> HloMCO::CopyResuableSubgraph(HloInstruction* inst) {
   std::vector<HloInstruction*> users;
+  // TODO:
+  // 并不能直接随便选取要替换的parent，而是应该替换掉除了当前分支parent之外的
+  // 如果替换了当前分支的parent，那么就会造成有一个没有访问的parent仍然指向这个节点，但是应该是指向
+  // clone的节点的，就会造成哪个
   users.assign(inst->users().begin() + 1, inst->users().end());
   HloInstruction* new_inst = inst->parent()->AddInstruction(inst->Clone());
   inst->ReplaceUsesWith(users, new_inst);
@@ -558,8 +570,7 @@ StatusOr<HloInstruction*> HloMCO::ComputeOptimalChainOrder(
 StatusOr<bool> HloMCO::ChainOptimize(
     HloComputation* computation,
     absl::flat_hash_map<HloInstruction*, std::vector<HloInstruction*>>&
-        chain_map,
-    std::vector<HloInstruction*> need_to_be_removed_instructions) {
+        chain_map) {
   DebugPrint("HloMCO::ChainOptimize", "Start");
   bool changed = false;
   for (auto& item : chain_map) {
@@ -573,10 +584,6 @@ StatusOr<bool> HloMCO::ChainOptimize(
     DebugPrint("HloMCO::ChainOptimize",
                "Before replace, chain_root.user.size = " +
                    std::to_string(item.first->users().size()));
-    if (item.first == item.first->parent()->root_instruction()) {
-      DebugPrint("HloMCO::ChainOptimize",
-                 "Need to replace computation root: " + item.first->name());
-    }
 
     item.first->ReplaceAllUsesWith(new_instruction);
     if (new_instruction == item.first->parent()->root_instruction()) {
@@ -587,21 +594,7 @@ StatusOr<bool> HloMCO::ChainOptimize(
     DebugPrint("HloMCO::ChainOptimize",
                "After replace, chain_root.user.size = " +
                    std::to_string(item.first->users().size()));
-    // TODO replace完了是不是还得remove？
 
-    // if (computation->IsSafelyRemovable(item.first)) {
-    //   if (item.first->users().empty() &&
-    //       item.first != computation->root_instruction()) {
-    //     TF_CHECK_OK(computation->RemoveInstruction(item.first));
-    //   }
-    // }
-    // sedond
-    // 里面都是operand，不能remove，需要remove的是那些被替换了的dot，这个感觉得用个什么东西记录一下或者再跑一次
-    // hlo dce
-
-    for (auto inst : need_to_be_removed_instructions) {
-      TF_CHECK_OK(computation->RemoveInstruction(inst));
-    }
     changed = true;
   }
   return changed;
@@ -628,16 +621,14 @@ StatusOr<bool> HloMCO::Run(HloModule* module) {
     auto chain_map = matrix_chain_detector.GetChainMap();
     DebugPrint("HloMCO::Run",
                "chain_map.size = " + std::to_string(chain_map.size()));
-    TF_ASSIGN_OR_RETURN(
-        bool changed_for_computation,
-        ChainOptimize(computation, chain_map,
-                      matrix_chain_detector.GetToBeRemovedInstructions()));
+    TF_ASSIGN_OR_RETURN(bool changed_for_computation,
+                        ChainOptimize(computation, chain_map));
     changed |= changed_for_computation;
     computation->Cleanup();
     DebugPrint("HloMCO::Run",
                "After optimization computation: " + computation->ToString());
   }
-
+  // After these pass, also need to run HloDCE and HloCSE
   return changed;
 }
 
