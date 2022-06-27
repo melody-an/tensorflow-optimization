@@ -202,9 +202,9 @@ main{
   %B = f32[20,30]{1,0} parameter(1), parameter_replication={false}, metadata={op_name="XLA_Args"}
   %dot1 = f32[40,30]{1,0} dot(f32[40,20]{1,0} %A, f32[20,30]{1,0} %B), lhs_contracting_dims={1}, rhs_contracting_dims={0}, metadata={op_type="MatMul" op_name="matmul"}
   %C = f32[30,10]{1,0} parameter(2), parameter_replication={false}, metadata={op_name="XLA_Args"}
-  %dot4 = f32[40,10]{1,0} dot(f32[40,30]{1,0} %dot1, f32[30,10]{1,0} %C), lhs_contracting_dims={1}, rhs_contracting_dims={0}, metadata={op_type="MatMul" op_name="matmul"}
+  %dot5 = f32[40,10]{1,0} dot(f32[40,30]{1,0} %dot1, f32[30,10]{1,0} %C), lhs_contracting_dims={1}, rhs_contracting_dims={0}, metadata={op_type="MatMul" op_name="matmul"}
   %D = f32[10]{0} parameter(3), parameter_replication={false}, metadata={op_name="XLA_Args"}
-  %dot2 = f32[40]{0} dot(f32[40,10]{1,0} %dot4, f32[10]{0} %D), lhs_contracting_dims={1}, rhs_contracting_dims={0}, metadata={op_type="Einsum" op_name="einsum/Einsum"}
+  %dot2 = f32[40]{0} dot(f32[40,10]{1,0} %dot5, f32[10]{0} %D), lhs_contracting_dims={1}, rhs_contracting_dims={0}, metadata={op_type="Einsum" op_name="einsum/Einsum"}
   %E = f32[40]{0} parameter(4), parameter_replication={false}, metadata={op_name="XLA_Args"}
   %dot3 = f32[] dot(f32[40]{0} %dot2, f32[40]{0} %E), lhs_contracting_dims={0}, rhs_contracting_dims={0}, metadata={op_type="Einsum" op_name="einsum_1/Einsum"}
   %F = f32[] parameter(5), parameter_replication={false}, metadata={op_name="XLA_Args"}
@@ -247,7 +247,8 @@ main{
 
 TEST_F(HloMCOTest, ReusedSameSubMatrixAfterOptimizationChain) {
   // Test opotimization in graph which contain a matrix cahin as a subgraph
-  // and a sub-chain of the graph is reused, but after optimization the sub-chain result doesn't change
+  // and a sub-chain of the graph is reused, but after optimization the
+  // sub-chain result doesn't change
   auto builder = HloComputation::Builder(TestName());
   const std::string hlo_text = R"(
 HloModule ReusedSameSubMatrixAfterOptimizationChain
@@ -260,9 +261,9 @@ main{
   %D = f32[10,30]{1,0} parameter(3)
   %dot3 = f32[40,30]{1,0} dot(f32[40,10]{1,0} %dot2, f32[10,30]{1,0} %D), lhs_contracting_dims={1}, rhs_contracting_dims={0}
   %E = f32[10,30]{1,0} parameter(4)
-  %dot4 = f32[40,30]{1,0} dot(f32[40,10]{1,0} %dot2, f32[10,30]{1,0} %E), lhs_contracting_dims={1}, rhs_contracting_dims={0}
+  %dot5 = f32[40,30]{1,0} dot(f32[40,10]{1,0} %dot2, f32[10,30]{1,0} %E), lhs_contracting_dims={1}, rhs_contracting_dims={0}
   %F = f32[40,30]{1,0} parameter(5)
-  %add1 = f32[40,30] add(%F, %dot4)
+  %add1 = f32[40,30] add(%F, %dot5)
   ROOT %add2 = f32[40,30] add(%dot3, %add1)
 }
 )";
@@ -302,7 +303,8 @@ main{
 
 TEST_F(HloMCOTest, ReusedDiffSubMatrixAfterOptimizationChain) {
   // Test opotimization in graph which contain a matrix cahin as a subgraph
-  // and a sub-chain of the graph is reused, but after optimization the sub-chain result change
+  // and a sub-chain of the graph is reused, but after optimization the
+  // sub-chain result change
   auto builder = HloComputation::Builder(TestName());
   const std::string hlo_text = R"(
 HloModule ReusedDiffSubMatrixAfterOptimizationChain
@@ -315,10 +317,127 @@ main{
   %D = f32[10,30]{1,0} parameter(3)
   %dot3 = f32[40,30]{1,0} dot(f32[40,10]{1,0} %dot2, f32[10,30]{1,0} %D), lhs_contracting_dims={1}, rhs_contracting_dims={0}
   %E = f32[30,30]{1,0} parameter(4)
-  %dot4 = f32[40,30]{1,0} dot(f32[40,30]{1,0} %dot1, f32[30,30]{1,0} %E), lhs_contracting_dims={1}, rhs_contracting_dims={0}
+  %dot5 = f32[40,30]{1,0} dot(f32[40,30]{1,0} %dot1, f32[30,30]{1,0} %E), lhs_contracting_dims={1}, rhs_contracting_dims={0}
   %F = f32[40,30]{1,0} parameter(5)
-  %add1 = f32[40,30] add(%F, %dot4)
+  %add1 = f32[40,30] add(%F, %dot5)
   ROOT %add2 = f32[40,30] add(%dot3, %add1)
+}
+)";
+
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> m,
+                          ParseAndReturnVerifiedModule(hlo_text));
+  std::string dir = "/vol/bitbucket/ya321/codes/MscProject/test_output/";
+  std::string filename = TestName() + "_before_opotimization";
+  // DebugOptions debug_options
+  auto render_graph = [&](RenderedGraphFormat format) {
+    StatusOr<string> rendered_graph =
+        RenderGraph(*m->entry_computation(),
+                    /*label=*/filename, m->config().debug_options(), format);
+    if (rendered_graph.ok()) {
+      return std::move(rendered_graph).ValueOrDie();
+    }
+    return absl::StrFormat("Error rendering graph: %s",
+                           rendered_graph.status().ToString());
+  };
+  std::cout << "Start Dumping " << filename << " to " << dir;
+  DumpToFileInDirImpl(dir, absl::StrFormat("%s.dot", filename),
+                      render_graph(RenderedGraphFormat::kDot));
+  HloMCO pass;
+  ASSERT_TRUE(pass.Run(m.get()).ValueOrDie());
+  HloDCE dce;
+  RunHloPass(&dce, m.get());
+  HloCSE cse(/*is_layout_sensitive=*/false);
+  cse.Run(m.get()).ValueOrDie();
+  HloInstruction* root = m->entry_computation()->root_instruction();
+  printf("After opotimization:\n %f\n", m->ToString().c_str());
+
+  filename = TestName() + "_after_opotimization";
+  std::cout << "Start Dumping " << filename << " to " << dir;
+  DumpToFileInDirImpl(dir, absl::StrFormat("%s.dot", filename),
+                      render_graph(RenderedGraphFormat::kDot));
+}
+TEST_F(HloMCOTest, ComplexChainWithRewrittenTranspose) {
+  // Test opotimization in graph which rewrites transpose op to dot op with
+  // contract dimensions{lhs=0,rhs=1}
+  auto builder = HloComputation::Builder(TestName());
+  const std::string hlo_text = R"(
+HloModule ComplexChainWithRewrittenTranspose
+main{
+  %A = f32[40,20]{1,0} parameter(0), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %B = f32[20,30]{1,0} parameter(1), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %dot1 = f32[40,30]{1,0} dot(f32[40,20]{1,0} %A, f32[20,30]{1,0} %B), lhs_contracting_dims={1}, rhs_contracting_dims={0}, metadata={op_type="MatMul" op_name="matmul"}
+  %C = f32[30,10]{1,0} parameter(2), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %dot2 = f32[40,10]{1,0} dot(f32[40,30]{1,0} %dot1, f32[30,10]{1,0} %C), lhs_contracting_dims={1}, rhs_contracting_dims={0}, metadata={op_type="MatMul" op_name="matmul_1"}
+  %H = f32[10,10]{1,0} parameter(7), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %D = f32[30,10]{1,0} parameter(3), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %G = f32[10,10]{1,0} parameter(6), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %dot3 = f32[30,10]{1,0} dot(f32[30,10]{1,0} %D, f32[10,10]{1,0} %G), lhs_contracting_dims={1}, rhs_contracting_dims={0}, metadata={op_type="MatMul" op_name="matmul_2"}
+  %dot4 = f32[10,30]{1,0} dot(f32[10,10]{1,0} %H, f32[30,10]{1,0} %dot3), lhs_contracting_dims={0}, rhs_contracting_dims={1}, metadata={op_type="Transpose" op_name="transpose"}
+  %dot5 = f32[40,30]{1,0} dot(f32[40,10]{1,0} %dot2, f32[10,30]{1,0} %dot4), lhs_contracting_dims={1}, rhs_contracting_dims={0}, metadata={op_type="MatMul" op_name="matmul_4"}
+  %E = f32[10,30]{1,0} parameter(4), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %dot6 = f32[40,30]{1,0} dot(f32[40,10]{1,0} %dot2, f32[10,30]{1,0} %E), lhs_contracting_dims={1}, rhs_contracting_dims={0}, metadata={op_type="MatMul" op_name="matmul_7"}
+  %F = f32[40,30]{1,0} parameter(5), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %add1 = f32[40,30]{1,0} add(f32[40,30]{1,0} %dot6, f32[40,30]{1,0} %F), metadata={op_type="AddV2" op_name="add"}
+  ROOT %add2 = f32[40,30]{1,0} add(f32[40,30]{1,0} %dot5, f32[40,30]{1,0} %add1), metadata={op_type="AddV2" op_name="add_1"}
+}
+)";
+
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> m,
+                          ParseAndReturnVerifiedModule(hlo_text));
+  std::string dir = "/vol/bitbucket/ya321/codes/MscProject/test_output/";
+  std::string filename = TestName() + "_before_opotimization";
+  // DebugOptions debug_options
+  auto render_graph = [&](RenderedGraphFormat format) {
+    StatusOr<string> rendered_graph =
+        RenderGraph(*m->entry_computation(),
+                    /*label=*/filename, m->config().debug_options(), format);
+    if (rendered_graph.ok()) {
+      return std::move(rendered_graph).ValueOrDie();
+    }
+    return absl::StrFormat("Error rendering graph: %s",
+                           rendered_graph.status().ToString());
+  };
+  std::cout << "Start Dumping " << filename << " to " << dir;
+  DumpToFileInDirImpl(dir, absl::StrFormat("%s.dot", filename),
+                      render_graph(RenderedGraphFormat::kDot));
+  HloMCO pass;
+  ASSERT_TRUE(pass.Run(m.get()).ValueOrDie());
+  HloDCE dce;
+  RunHloPass(&dce, m.get());
+  HloCSE cse(/*is_layout_sensitive=*/false);
+  cse.Run(m.get()).ValueOrDie();
+  HloInstruction* root = m->entry_computation()->root_instruction();
+  printf("After opotimization:\n %f\n", m->ToString().c_str());
+
+  filename = TestName() + "_after_opotimization";
+  std::cout << "Start Dumping " << filename << " to " << dir;
+  DumpToFileInDirImpl(dir, absl::StrFormat("%s.dot", filename),
+                      render_graph(RenderedGraphFormat::kDot));
+}
+TEST_F(HloMCOTest, ComplexChainWithTranspose) {
+  // Test opotimization in graph which rewrites transpose op to dot op with
+  // contract dimensions{lhs=0,rhs=1}
+  auto builder = HloComputation::Builder(TestName());
+  const std::string hlo_text = R"(
+HloModule ComplexChainWithTranspose
+main{
+  %A = f32[40,20]{1,0} parameter(0), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %B = f32[20,30]{1,0} parameter(1), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %dot1 = f32[40,30]{1,0} dot(f32[40,20]{1,0} %A, f32[20,30]{1,0} %B), lhs_contracting_dims={1}, rhs_contracting_dims={0}, metadata={op_type="MatMul" op_name="matmul"}
+  %C = f32[30,10]{1,0} parameter(2), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %dot2 = f32[40,10]{1,0} dot(f32[40,30]{1,0} %dot1, f32[30,10]{1,0} %C), lhs_contracting_dims={1}, rhs_contracting_dims={0}, metadata={op_type="MatMul" op_name="matmul_1"}
+  %H = f32[10,10]{1,0} parameter(7), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %D = f32[30,10]{1,0} parameter(3), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %G = f32[10,10]{1,0} parameter(6), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %dot3 = f32[30,10]{1,0} dot(f32[30,10]{1,0} %D, f32[10,10]{1,0} %G), lhs_contracting_dims={1}, rhs_contracting_dims={0}, metadata={op_type="MatMul" op_name="matmul_2"}
+  %dot4 = f32[30,10]{1,0} dot(f32[30,10]{1,0} %dot3, f32[10,10]{1,0} %H ), lhs_contracting_dims={1}, rhs_contracting_dims={0}, metadata={op_type="MatMul" op_name="matmul_3"}
+  %transpose = f32[10,30]{0,1} transpose(f32[30,10]{1,0} %dot4), dimensions={1,0}, metadata={op_type="Transpose" op_name="transpose"}
+  %dot5 = f32[40,30]{1,0} dot(f32[40,10]{1,0} %dot2, f32[10,30]{0,1} %transpose), lhs_contracting_dims={1}, rhs_contracting_dims={0}, metadata={op_type="MatMul" op_name="matmul_4"}
+  %E = f32[10,30]{1,0} parameter(4), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %dot6 = f32[40,30]{1,0} dot(f32[40,10]{1,0} %dot2, f32[10,30]{1,0} %E), lhs_contracting_dims={1}, rhs_contracting_dims={0}, metadata={op_type="MatMul" op_name="matmul_7"}
+  %F = f32[40,30]{1,0} parameter(5), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %add1 = f32[40,30]{1,0} add(f32[40,30]{1,0} %dot6, f32[40,30]{1,0} %F), metadata={op_type="AddV2" op_name="add"}
+  ROOT %add2 = f32[40,30]{1,0} add(f32[40,30]{1,0} %dot5, f32[40,30]{1,0} %add1), metadata={op_type="AddV2" op_name="add_1"}
 }
 )";
 

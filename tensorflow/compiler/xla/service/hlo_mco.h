@@ -103,6 +103,7 @@ class MatrixChainDetector : public DfsHloVisitorWithDefault {
   }
   Status DefaultAction(HloInstruction* hlo) override { return Status::OK(); }
   Status Preprocess(HloInstruction* hlo) override;
+  static bool CheckRealDot(HloInstruction* hlo);
   // Status Postprocess(HloInstruction* hlo) override;
 
   // Status HandleDot(HloInstruction* dot) override;

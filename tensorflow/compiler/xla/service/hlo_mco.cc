@@ -146,13 +146,13 @@ static StatusOr<std::deque<HloInstruction*>> DetectMatrixChainPreorderDFS(
     }
 
     dfs_stack.pop_back();
+    bool is_matmul_node = MatrixChainDetector::CheckRealDot(current_node);
     VLOG(2) << "[DetectMatrixChainPreorderDFS] "
             << "Visiting HLO %" << current_node->name();
     DebugPrint("DetectMatrixChainPreorderDFS",
-               "Visiting HLO = " + current_node->name() + " opcode = " +
-                   HloOpcodeString(current_node->opcode()) + " is_matmul = " +
-                   std::to_string(current_node->opcode() == HloOpcode::kDot));
-    bool is_matmul_node = (current_node->opcode() == HloOpcode::kDot);
+               "Visiting HLO = " + current_node->name() +
+                   " opcode = " + HloOpcodeString(current_node->opcode()) +
+                   " is_matmul = " + std::to_string(is_matmul_node));
     visitor->Preprocess(current_node);
     visitor->SetVisitState(current_id, Visitor::kVisited);
     if (!is_matmul_node) {
@@ -232,7 +232,7 @@ Status ParentsDetector::Preprocess(HloInstruction* hlo) {
 }
 
 Status ChainRecorder::Preprocess(HloInstruction* hlo) {
-  if (hlo->opcode() != HloOpcode::kDot) {
+  if (!MatrixChainDetector::CheckRealDot(hlo)) {
     chain_map[chain_root].emplace_back(hlo);
     DebugPrint("ChainRecorder::Preprocess",
                "Add node: " + hlo->name() + " to root: " + chain_root->name() +
@@ -283,13 +283,45 @@ Status MatrixChainDetector::DetectMatrixChain(HloInstruction* chain_root) {
              "Finished chain_map.size() = " + std::to_string(chain_map.size()));
   return Status::OK();
 }
+bool MatrixChainDetector::CheckRealDot(HloInstruction* hlo) {
+  if (hlo->opcode() != HloOpcode::kDot) {
+    return false;
+  }
+
+  const DotDimensionNumbers& dnums = hlo->dot_dimension_numbers();
+
+  if (dnums.lhs_contracting_dimensions_size() != 1 ||
+      dnums.rhs_contracting_dimensions_size() != 1 ||
+      dnums.lhs_batch_dimensions_size() != 0 ||
+      dnums.rhs_batch_dimensions_size() != 0 ||
+      *(dnums.lhs_contracting_dimensions().begin()) != 1 ||
+      *(dnums.rhs_contracting_dimensions().begin()) != 0 ||
+      hlo->shape().dimensions_size() != 2) {
+    // since transpose op may be rewritten to dot op with
+    // lhs_contracting_dimension = {0} rhs_contracting_dimension = {1}
+    // such dot is actuall a tranpose and is not associative with other dots.
+    DebugPrint(
+        "MatrixChainDetector::CheckRealDot",
+        " kDot check fail: inst.name:" + hlo->name() + " opcode = " +
+            HloOpcodeString(hlo->opcode()) + " dimensions_size() = " +
+            std::to_string(hlo->shape().dimensions_size()) +
+            " lhs_contracting_dimension = " +
+            std::to_string(*(dnums.lhs_contracting_dimensions().begin())) +
+            " rhs_contracting_dimension = " +
+            std::to_string(*(dnums.rhs_contracting_dimensions().begin())));
+
+    return false;
+  }
+  return true;
+}
 Status MatrixChainDetector::Preprocess(HloInstruction* hlo) {
   DebugPrint("MatrixChainDetector::Preprocess",
              "inst.name:" + hlo->name() +
                  " opcode = " + HloOpcodeString(hlo->opcode()));
   // skip 2D dot op but if it is the root_instruction, then it must be the root
   // of a matrix chain
-  if (hlo->opcode() == HloOpcode::kDot && hlo->shape().dimensions_size() == 2) {
+
+  if (CheckRealDot(hlo)) {
     if (hlo != hlo->parent()->root_instruction()) {
       return Status::OK();
     } else {
@@ -309,38 +341,31 @@ Status MatrixChainDetector::Preprocess(HloInstruction* hlo) {
       return Status::OK();
     }
   }
+
   for (auto op : hlo->operands()) {
     DebugPrint("MatrixChainDetector::Preprocess",
                "operand.name:" + op->name() +
                    " opcode = " + HloOpcodeString(op->opcode()));
-    if (op->opcode() == HloOpcode::kDot) {
+    if (!CheckRealDot(op)) {
       // Only consider 2D dot product for now
-      const DotDimensionNumbers& dnums = op->dot_dimension_numbers();
-      if (dnums.lhs_contracting_dimensions_size() != 1 ||
-          dnums.rhs_contracting_dimensions_size() != 1 ||
-          dnums.lhs_batch_dimensions_size() != 0 ||
-          dnums.rhs_batch_dimensions_size() != 0 ||
-          op->shape().dimensions_size() != 2) {
-        VLOG(10)
-            << "[MatrixChainDetector]: Can only optimize 2D, non-batch dot "
-               "operations.";
-        DebugPrint("MatrixChainDetector::Preprocess",
-                   "Can only optimize 2D non-batch dot operations.");
-        continue;
-      }
-      // current node != kDot, child op = kDot, child op is the root of a matrix
-      // chain
-      if (chain_map.contains(op)) {
-        // find a reused chain which has already been added into chain_map
-        continue;
-      }
-      TF_RETURN_IF_ERROR(DetectMatrixChain(op));
-      DebugPrint(
-          "MatrixChainDetector::Preprocess",
-          "After DetectMatrixChain(" + hlo->name() +
-              ") chain_map.size() = " + std::to_string(chain_map.size()));
+      VLOG(10) << "[MatrixChainDetector]: Can only optimize 2D, non-batch dot "
+                  "operations.";
+      DebugPrint("MatrixChainDetector::Preprocess",
+                 "Can only optimize 2D non-batch dot operations.");
+      continue;
     }
+    // current node != kDot, child op = kDot, child op is the root of a matrix
+    // chain
+    if (chain_map.contains(op)) {
+      // find a reused chain which has already been added into chain_map
+      continue;
+    }
+    TF_RETURN_IF_ERROR(DetectMatrixChain(op));
+    DebugPrint("MatrixChainDetector::Preprocess",
+               "After DetectMatrixChain(" + op->name() +
+                   ") chain_map.size() = " + std::to_string(chain_map.size()));
   }
+
   return Status::OK();
 }
 
