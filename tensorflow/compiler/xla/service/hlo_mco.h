@@ -7,6 +7,7 @@
 #include "tensorflow/compiler/xla/service/hlo_module.h"
 #include "tensorflow/compiler/xla/service/hlo_pass_interface.h"
 #include "tensorflow/compiler/xla/service/shape_inference.h"
+#include "tensorflow/compiler/xla/util.h"
 
 namespace xla {
 
@@ -117,6 +118,12 @@ class MatrixChainDetector : public DfsHloVisitorWithDefault {
  private:
   // Each kv pair is (chain_root_ptr, vector<chain_instruction_ptr>)
   absl::flat_hash_map<HloInstruction*, std::vector<HloInstruction*>> chain_map;
+};
+class CleanupVisitor : public DfsHloRewriteVisitor {
+ public:
+  Status HandleReshape(HloInstruction* reshape) override;
+  Status HandleTranspose(HloInstruction* transpose) override;
+  bool SameShape(const HloInstruction* lhs, const HloInstruction* rhs) const;
 };
 
 }  // namespace xla

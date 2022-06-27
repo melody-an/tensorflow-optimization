@@ -2,6 +2,7 @@
 
 #include "absl/strings/string_view.h"
 #include "tensorflow/compiler/xla/literal_util.h"
+#include "tensorflow/compiler/xla/service/algebraic_simplifier.h"
 #include "tensorflow/compiler/xla/service/hlo_cse.h"
 #include "tensorflow/compiler/xla/service/hlo_dce.h"
 #include "tensorflow/compiler/xla/service/hlo_graph_dumper.h"
@@ -461,6 +462,82 @@ main{
                       render_graph(RenderedGraphFormat::kDot));
   HloMCO pass;
   ASSERT_TRUE(pass.Run(m.get()).ValueOrDie());
+  HloDCE dce;
+  RunHloPass(&dce, m.get());
+  HloCSE cse(/*is_layout_sensitive=*/false);
+  cse.Run(m.get()).ValueOrDie();
+  HloInstruction* root = m->entry_computation()->root_instruction();
+  printf("After opotimization:\n %f\n", m->ToString().c_str());
+
+  filename = TestName() + "_after_opotimization";
+  std::cout << "Start Dumping " << filename << " to " << dir;
+  DumpToFileInDirImpl(dir, absl::StrFormat("%s.dot", filename),
+                      render_graph(RenderedGraphFormat::kDot));
+}
+TEST_F(HloMCOTest, UncleanedChainWithReshapeTranspose) {
+  // Test opotimization in graph which rewrites transpose op to dot op with
+  // contract dimensions{lhs=0,rhs=1}
+  auto builder = HloComputation::Builder(TestName());
+  const std::string hlo_text = R"(
+HloModule UncleanedChainWithReshapeTranspose
+main{
+  %arg0.1 = f32[40,20]{1,0} parameter(0), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %reshape.9 = f32[40,20]{1,0} reshape(f32[40,20]{1,0} %arg0.1)
+  %arg1.2 = f32[20,30]{1,0} parameter(1), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %reshape.10 = f32[20,30]{1,0} reshape(f32[20,30]{1,0} %arg1.2)
+  %dot.17 = f32[40,30]{1,0} dot(f32[40,20]{1,0} %reshape.9, f32[20,30]{1,0} %reshape.10), lhs_contracting_dims={1}, rhs_contracting_dims={0}, metadata={op_type="MatMul" op_name="matmul"}
+  %transpose.18 = f32[40,30]{1,0} transpose(f32[40,30]{1,0} %dot.17), dimensions={0,1}, metadata={op_type="MatMul" op_name="matmul"}
+  %arg2.3 = f32[30,10]{1,0} parameter(2), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %reshape.11 = f32[30,10]{1,0} reshape(f32[30,10]{1,0} %arg2.3)
+  %dot.21 = f32[40,10]{1,0} dot(f32[40,30]{1,0} %transpose.18, f32[30,10]{1,0} %reshape.11), lhs_contracting_dims={1}, rhs_contracting_dims={0}, metadata={op_type="MatMul" op_name="matmul_1"}
+  %transpose.22 = f32[40,10]{1,0} transpose(f32[40,10]{1,0} %dot.21), dimensions={0,1}, metadata={op_type="MatMul" op_name="matmul_1"}
+  %arg3.4 = f32[30,10]{1,0} parameter(3), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %reshape.12 = f32[30,10]{1,0} reshape(f32[30,10]{1,0} %arg3.4)
+  %arg6.7 = f32[10,10]{1,0} parameter(6), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %reshape.15 = f32[10,10]{1,0} reshape(f32[10,10]{1,0} %arg6.7)
+  %dot.28 = f32[30,10]{1,0} dot(f32[30,10]{1,0} %reshape.12, f32[10,10]{1,0} %reshape.15), lhs_contracting_dims={1}, rhs_contracting_dims={0}, metadata={op_type="MatMul" op_name="matmul_2"}
+  %transpose.29 = f32[30,10]{1,0} transpose(f32[30,10]{1,0} %dot.28), dimensions={0,1}, metadata={op_type="MatMul" op_name="matmul_2"}
+  %arg7.8 = f32[10,10]{1,0} parameter(7), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %reshape.16 = f32[10,10]{1,0} reshape(f32[10,10]{1,0} %arg7.8)
+  %dot.30 = f32[30,10]{1,0} dot(f32[30,10]{1,0} %transpose.29, f32[10,10]{1,0} %reshape.16), lhs_contracting_dims={1}, rhs_contracting_dims={0}, metadata={op_type="MatMul" op_name="matmul_3"}
+  %transpose.31 = f32[30,10]{1,0} transpose(f32[30,10]{1,0} %dot.30), dimensions={0,1}, metadata={op_type="MatMul" op_name="matmul_3"}
+  %dot = f32[40,30]{1,0} dot(f32[40,10]{1,0} %transpose.22, f32[30,10]{1,0} %transpose.31), lhs_contracting_dims={1}, rhs_contracting_dims={1}, metadata={op_type="MatMul" op_name="matmul_4"}
+  %transpose.34 = f32[40,30]{1,0} transpose(f32[40,30]{1,0} %dot), dimensions={0,1}, metadata={op_type="MatMul" op_name="matmul_4"}
+  %arg4.5 = f32[10,30]{1,0} parameter(4), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %reshape.13 = f32[10,30]{1,0} reshape(f32[10,30]{1,0} %arg4.5)
+  %dot.25 = f32[40,30]{1,0} dot(f32[40,10]{1,0} %transpose.22, f32[10,30]{1,0} %reshape.13), lhs_contracting_dims={1}, rhs_contracting_dims={0}, metadata={op_type="MatMul" op_name="matmul_7"}
+  %transpose.26 = f32[40,30]{1,0} transpose(f32[40,30]{1,0} %dot.25), dimensions={0,1}, metadata={op_type="MatMul" op_name="matmul_7"}
+  %arg5.6 = f32[40,30]{1,0} parameter(5), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %reshape.14 = f32[40,30]{1,0} reshape(f32[40,30]{1,0} %arg5.6)
+  %add.27 = f32[40,30]{1,0} add(f32[40,30]{1,0} %transpose.26, f32[40,30]{1,0} %reshape.14), metadata={op_type="AddV2" op_name="add"}
+  %add.35 = f32[40,30]{1,0} add(f32[40,30]{1,0} %transpose.34, f32[40,30]{1,0} %add.27), metadata={op_type="AddV2" op_name="add_1"}
+  ROOT %reshape.36 = f32[40,30]{1,0} reshape(f32[40,30]{1,0} %add.35), metadata={op_name="XLA_Retvals"}
+}
+)";
+
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> m,
+                          ParseAndReturnVerifiedModule(hlo_text));
+  std::string dir = "/vol/bitbucket/ya321/codes/MscProject/test_output/";
+  std::string filename = TestName() + "_before_opotimization";
+  // DebugOptions debug_options
+  auto render_graph = [&](RenderedGraphFormat format) {
+    StatusOr<string> rendered_graph =
+        RenderGraph(*m->entry_computation(),
+                    /*label=*/filename, m->config().debug_options(), format);
+    if (rendered_graph.ok()) {
+      return std::move(rendered_graph).ValueOrDie();
+    }
+    return absl::StrFormat("Error rendering graph: %s",
+                           rendered_graph.status().ToString());
+  };
+  std::cout << "Start Dumping " << filename << " to " << dir;
+  DumpToFileInDirImpl(dir, absl::StrFormat("%s.dot", filename),
+                      render_graph(RenderedGraphFormat::kDot));
+  HloMCO pass;
+  ASSERT_TRUE(pass.Run(m.get()).ValueOrDie());
+  AlgebraicSimplifierOptions default_options_;
+  AlgebraicSimplifier simplifier(default_options_);
+  simplifier.Run(m.get()).ValueOrDie();
   HloDCE dce;
   RunHloPass(&dce, m.get());
   HloCSE cse(/*is_layout_sensitive=*/false);

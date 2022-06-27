@@ -218,6 +218,56 @@ static StatusOr<std::deque<HloInstruction*>> DetectMatrixChainPreorderDFS(
 
 }  // namespace
 
+bool CleanupVisitor::SameShape(const HloInstruction* lhs,
+                               const HloInstruction* rhs) const {
+  return ShapeUtil::Compatible(lhs->shape(), rhs->shape());
+}
+Status CleanupVisitor::HandleReshape(HloInstruction* reshape) {
+  auto operand = reshape->mutable_operand(0);
+  // Delete no-op reshapes, i.e. where shape = operand shape.
+  if (SameShape(reshape, operand)) {
+    VLOG(10) << "deleting no-op reshape";
+    return ReplaceInstruction(reshape, operand);
+  }
+
+  // Merge reshapes.
+  if (HloOpcode::kReshape == operand->opcode()) {
+    return ReplaceWithNewInstruction(
+        reshape, HloInstruction::CreateReshape(reshape->shape(),
+                                               operand->mutable_operand(0)));
+  }
+
+  if (operand->opcode() == HloOpcode::kRng && operand->user_count() == 1) {
+    *operand->mutable_shape() = reshape->shape();
+    return ReplaceInstruction(reshape, operand);
+  }
+
+  return Status::OK();
+}
+
+Status CleanupVisitor::HandleTranspose(HloInstruction* transpose) {
+  auto operand = transpose->mutable_operand(0);
+  if (std::is_sorted(transpose->dimensions().begin(),
+                     transpose->dimensions().end())) {
+    VLOG(10) << "deleting no-op transpose";
+    return ReplaceInstruction(transpose, operand);
+  }
+
+  if (HloOpcode::kTranspose == operand->opcode()) {
+    return ReplaceWithNewInstruction(
+        transpose, HloInstruction::CreateTranspose(
+                       transpose->shape(), operand->mutable_operand(0),
+                       ComposePermutations(operand->dimensions(),
+                                           transpose->dimensions())));
+  }
+
+  if (operand->opcode() == HloOpcode::kRng && operand->user_count() == 1) {
+    *operand->mutable_shape() = transpose->shape();
+    return ReplaceInstruction(transpose, operand);
+  }
+
+  return Status::OK();
+}
 Status ParentsDetector::Preprocess(HloInstruction* hlo) {
   // add operand-parents relation of current node and its operands in to
   // global_operand_parent_map
@@ -637,6 +687,9 @@ StatusOr<bool> HloMCO::Run(HloModule* module) {
   // std::cout << "[HloMCO::Run]:\n" << hlo_text << std::endl;
   for (auto* computation : module->computations()) {
     DebugPrint("HloMCO::Run", "computation: " + computation->ToString());
+    DebugPrint("HloMCO::Run", "start cleanup_visitor");
+    CleanupVisitor cleanup_visitor;
+    TF_RETURN_IF_ERROR(computation->Accept(&cleanup_visitor));
     DebugPrint("HloMCO::Run", "start matriox_chain_detector");
     MatrixChainDetector matrix_chain_detector;
     // detection matrix chain on the whithin the computation
