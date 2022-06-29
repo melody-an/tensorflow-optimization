@@ -24,6 +24,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/hlo_casting_utils.h"
 #include "tensorflow/compiler/xla/service/hlo_computation.h"
 // #include "tensorflow/compiler/xla/service/hlo_instruction.cc"
+#include "tensorflow/compiler/xla/service/hlo_creation_utils.h"
 #include "tensorflow/compiler/xla/service/hlo_instruction.h"
 #include "tensorflow/compiler/xla/service/hlo_instructions.h"
 #include "tensorflow/compiler/xla/service/hlo_opcode.h"
@@ -31,7 +32,6 @@ limitations under the License.
 #include "tensorflow/compiler/xla/util.h"
 #include "tensorflow/compiler/xla/xla_data.pb.h"
 #include "tensorflow/core/lib/core/errors.h"
-
 namespace xla {
 
 namespace {
@@ -103,7 +103,7 @@ inline bool PushDFSChild(Visitor* visitor, DFSStack* dfs_stack,
 
 // perform a pre-order DFS to find an existing chain
 template <typename Visitor>
-static StatusOr<std::deque<HloInstruction*>> DetectMatrixChainPreorderDFS(
+static Status DetectMatrixChainPreorderDFS(
     HloInstruction* root, Visitor* visitor,
     bool ignore_control_predecessors = false) {
   // Calculating the instruction count within a module can be expensive on large
@@ -121,8 +121,6 @@ static StatusOr<std::deque<HloInstruction*>> DetectMatrixChainPreorderDFS(
   // its id.
   DFSStack dfs_stack;
   dfs_stack.emplace_back(root->unique_id(), root);
-  // used to record roots of new copied chains
-  std::deque<HloInstruction*> new_chain_roots;
   DebugPrint("DetectMatrixChainPreorderDFS",
              "Start, root = " + root->name() +
                  "opcode = " + HloOpcodeString(root->opcode()));
@@ -153,7 +151,7 @@ static StatusOr<std::deque<HloInstruction*>> DetectMatrixChainPreorderDFS(
                "Visiting HLO = " + current_node->name() +
                    " opcode = " + HloOpcodeString(current_node->opcode()) +
                    " is_matmul = " + std::to_string(is_matmul_node));
-    visitor->Preprocess(current_node);
+    TF_RETURN_IF_ERROR(visitor->Preprocess(current_node));
     visitor->SetVisitState(current_id, Visitor::kVisited);
     if (!is_matmul_node) {
       // for ohter op, we just target the its child nodes in the current branch
@@ -165,30 +163,6 @@ static StatusOr<std::deque<HloInstruction*>> DetectMatrixChainPreorderDFS(
         "current_node = " + current_node->name() +
             " opcode = " + HloOpcodeString(current_node->opcode()) +
             " users.size = " + std::to_string(current_node->users().size()));
-    if (current_node != root && current_node->users().size() > 1) {
-      // for reused sub matrix chain, need to copy
-      // TODO: 在这里打印下原版和clone的name以及user数量等信息
-      // DebugPrint(
-      //     "DetectMatrixChainPreorderDFS",
-      //     "need copy current_node = " + current_node->name() +
-      //         " opcode = " + HloOpcodeString(current_node->opcode()) +
-      //         " users.size = " +
-      //         std::to_string(current_node->users().size()));
-      // auto status_or = HloMCO::CopyResuableSubgraph(current_node);
-      // HloInstruction* new_chain = std::move(status_or).ValueOrDie();
-      // DebugPrint(
-      //     "DetectMatrixChainPreorderDFS",
-      //     "after copy current_node = " + current_node->name() +
-      //         " opcode = " + HloOpcodeString(current_node->opcode()) +
-      //         " users.size = " +
-      //         std::to_string(current_node->users().size()));
-      // DebugPrint(
-      //     "DetectMatrixChainPreorderDFS",
-      //     "after copy new_chain_root = " + new_chain->name() +
-      //         " opcode = " + HloOpcodeString(new_chain->opcode()) +
-      //         " users.size = " + std::to_string(new_chain->users().size()));
-      // new_chain_roots.emplace_back(new_chain);
-    }
 
     const size_t old_dfs_stack_size = dfs_stack.size();
     // current_node is a dot op, must have 2 operands
@@ -213,70 +187,273 @@ static StatusOr<std::deque<HloInstruction*>> DetectMatrixChainPreorderDFS(
     std::reverse(dfs_stack.begin() + old_dfs_stack_size, dfs_stack.end());
   } while (!dfs_stack.empty());
 
-  return new_chain_roots;
+  return Status::OK();
+}
+
+// perform a pre-order DFS and rewrite nodes during traversal
+// template <typename Visitor>
+static Status TransUnfolderPreorderDFSRewriter(
+    HloInstruction* root, TransposeUnfolder* visitor, bool& changed,
+    bool ignore_control_predecessors = false) {
+  // Calculating the instruction count within a module can be expensive on large
+  // models so only do it if the visit state is empty. This will help when the
+  // same visitor is reused across many computations of a single module.
+  if (visitor->VisitStateCapacity() == 0) {
+    visitor->ReserveVisitStates(root->GetModule()->instruction_count());
+  }
+
+  // dfs_stack holds pairs of <HloInstruction*->unique_id(), HloInstruction*>.
+  //
+  // We need to keep track of both the id and the instruction because
+  // instructions can get deleted while they are on the stack, so we
+  // can't always use the (potentially dead) instruction object to grab
+  // its id.
+  DFSStack dfs_stack;
+  dfs_stack.emplace_back(root->unique_id(), root);
+  // used to record roots of new copied chains
+  DebugPrint("TransUnfolderPreorderDFSRewriter",
+             "Start, root = " + root->name() +
+                 "opcode = " + HloOpcodeString(root->opcode()));
+
+  do {
+    DCHECK(!dfs_stack.empty());
+
+    int current_id = dfs_stack.back().first;
+    HloInstruction* current_node = dfs_stack.back().second;
+    CHECK_GE(current_id, 0)
+        << "[TransUnfolderPreorderDFSRewriter] " << current_id << ": "
+        << current_node << ": instruction may not have parent computation";
+    typename TransposeUnfolder::VisitState visit_state =
+        visitor->GetVisitState(current_id);
+    if (visit_state == TransposeUnfolder::kVisited) {
+      dfs_stack.pop_back();
+      VLOG(3) << "[TransUnfolderPreorderDFSRewriter] "
+              << "Not visiting HLO (id = " << current_id
+              << ") as it was already visited.";
+      continue;
+    }
+
+    dfs_stack.pop_back();
+    VLOG(2) << "[TransUnfolderPreorderDFSRewriter] "
+            << "Visiting HLO %" << current_node->name();
+    DebugPrint("TransUnfolderPreorderDFSRewriter",
+               "Visiting HLO = " + current_node->name() +
+                   " opcode = " + HloOpcodeString(current_node->opcode()));
+    TF_RETURN_IF_ERROR(visitor->Preprocess(current_node));
+    TF_RETURN_IF_ERROR(current_node->Visit(visitor));
+    visitor->SetVisitState(current_id, TransposeUnfolder::kVisited);
+    TF_RETURN_IF_ERROR(visitor->Postprocess(current_node));
+    if (visitor->OldNewMapContain(current_node)) {
+      auto tmp = current_node;
+      DebugPrint("TransUnfolderPreorderDFSRewriter",
+                 "Before replace current_node = " + current_node->name() +
+                     " opcode = " + HloOpcodeString(current_node->opcode()) +
+                     " OldNewMapContain() = " +
+                     std::to_string(visitor->OldNewMapContain(tmp)));
+      current_node = visitor->GetNewInst(current_node);
+      visitor->DeleteOldInst(tmp);
+      DebugPrint("TransUnfolderPreorderDFSRewriter",
+                 "Before replace current_node = " + current_node->name() +
+                     " opcode = " + HloOpcodeString(current_node->opcode()) +
+                     " OldNewMapContain() = " +
+                     std::to_string(visitor->OldNewMapContain(tmp)));
+      changed |= true;
+    }
+    DebugPrint(
+        "TransUnfolderPreorderDFSRewriter",
+        "current_node = " + current_node->name() +
+            " opcode = " + HloOpcodeString(current_node->opcode()) +
+            " users.size = " + std::to_string(current_node->users().size()));
+
+    const size_t old_dfs_stack_size = dfs_stack.size();
+    for (HloInstruction* child : current_node->operands()) {
+      if (!TF_PREDICT_TRUE(PushDFSChild(visitor, &dfs_stack, child))) {
+        PrintCycle(child, &dfs_stack);
+        return FailedPrecondition(
+            "TransUnfolderPreorderDFSRewriter A cycle is detected while "
+            "visiting "
+            "instruction %s",
+            current_node->ToString());
+      }
+      DebugPrint("TransUnfolderPreorderDFSRewriter",
+                 "current_node = " + current_node->name() +
+                     " opcode = " + HloOpcodeString(current_node->opcode()) +
+                     " Add Child " + child->name() +
+                     " opcode = " + HloOpcodeString(child->opcode()));
+    }
+
+    // This makes the traversal order the same as what you'd expect
+    // out of a recursive algorithm.
+    std::reverse(dfs_stack.begin() + old_dfs_stack_size, dfs_stack.end());
+  } while (!dfs_stack.empty());
+
+  return Status::OK();
+}
+
+Status PreOrderAccept(HloComputation* computation, TransposeUnfolder* visitor,
+                      bool& changed) {
+  return TransUnfolderPreorderDFSRewriter(computation->root_instruction(),
+                                          visitor, changed);
 }
 
 }  // namespace
 
-bool CleanupVisitor::SameShape(const HloInstruction* lhs,
-                               const HloInstruction* rhs) const {
-  return ShapeUtil::Compatible(lhs->shape(), rhs->shape());
+bool TransposeUnfolder::OldNewMapContain(HloInstruction* old_inst) {
+  DebugPrint("TransposeUnfolder::OldNewMapContain",
+             "LookUp " + old_inst->name());
+  return old_new_inst_map.contains(old_inst);
 }
-Status CleanupVisitor::HandleReshape(HloInstruction* reshape) {
-  auto operand = reshape->mutable_operand(0);
-  // Delete no-op reshapes, i.e. where shape = operand shape.
-  if (SameShape(reshape, operand)) {
-    VLOG(10) << "deleting no-op reshape";
-    return ReplaceInstruction(reshape, operand);
-  }
+HloInstruction* TransposeUnfolder::GetNewInst(HloInstruction* old_inst) {
+  return old_new_inst_map[old_inst];
+}
 
-  // Merge reshapes.
-  if (HloOpcode::kReshape == operand->opcode()) {
-    return ReplaceWithNewInstruction(
-        reshape, HloInstruction::CreateReshape(reshape->shape(),
-                                               operand->mutable_operand(0)));
-  }
+bool TransposeUnfolder::DeleteOldInst(HloInstruction* old_inst) {
+  return old_new_inst_map.erase(old_inst);
+}
 
-  if (operand->opcode() == HloOpcode::kRng && operand->user_count() == 1) {
-    *operand->mutable_shape() = reshape->shape();
-    return ReplaceInstruction(reshape, operand);
+void TransposeUnfolder::InsertOldNewMap(HloInstruction* old_inst,
+                                        HloInstruction* new_inst) {
+  if (old_new_inst_map.contains(old_inst)) {
+    DebugPrint("TransposeUnfolder::old_new_inst_map",
+               "Error: already contains: " + old_inst->name());
   }
+  old_new_inst_map.insert({old_inst, new_inst});
+}
 
+bool TransposeUnfolder::IsTransDot(const HloInstruction* hlo) {
+  if (hlo->opcode() != HloOpcode::kDot) {
+    return false;
+  }
+  const DotDimensionNumbers& dnums = hlo->dot_dimension_numbers();
+
+  if (dnums.lhs_contracting_dimensions_size() != 1 ||
+      dnums.rhs_contracting_dimensions_size() != 1 ||
+      dnums.lhs_batch_dimensions_size() != 0 ||
+      dnums.rhs_batch_dimensions_size() != 0 ||
+      hlo->shape().dimensions_size() != 2 ||
+      *(dnums.lhs_contracting_dimensions().begin()) != 0 ||
+      *(dnums.rhs_contracting_dimensions().begin()) != 1) {
+    return false;
+  }
+  return true;
+}
+bool TransposeUnfolder::IsRegularDot(const HloInstruction* hlo) {
+  if (hlo->opcode() != HloOpcode::kDot) {
+    return false;
+  }
+  const DotDimensionNumbers& dnums = hlo->dot_dimension_numbers();
+
+  if (dnums.lhs_contracting_dimensions_size() != 1 ||
+      dnums.rhs_contracting_dimensions_size() != 1 ||
+      dnums.lhs_batch_dimensions_size() != 0 ||
+      dnums.rhs_batch_dimensions_size() != 0 ||
+      hlo->shape().dimensions_size() != 2 ||
+      *(dnums.lhs_contracting_dimensions().begin()) != 1 ||
+      *(dnums.rhs_contracting_dimensions().begin()) != 0) {
+    return false;
+  }
+  return true;
+}
+Status TransposeUnfolder::HandleDot(HloInstruction* dot) {
+  if (IsTransDot(dot)) {
+    StatusOr<HloInstruction*> status_or =
+        MakeTransposeHlo(dot->mutable_operand(0), {1, 0});
+    auto lhs_trans = std::move(status_or).ValueOrDie();
+    status_or = MakeTransposeHlo(dot->mutable_operand(1), {1, 0});
+    auto rhs_trans = std::move(status_or).ValueOrDie();
+    // cur_node = replace(cur_node, create_dot(trans_op0, trans_op1))
+
+    const Shape lhs_shape = lhs_trans->shape();
+    DotDimensionNumbers dimension_numbers;
+    dimension_numbers.add_lhs_contracting_dimensions(
+        lhs_shape.dimensions_size() == 1 ? 0 : 1);
+    dimension_numbers.add_rhs_contracting_dimensions(0);
+
+    auto shape_status_or = ShapeInference::InferDotOpShape(
+        lhs_trans->shape(), rhs_trans->shape(), dimension_numbers);
+    Shape output_shape = std::move(shape_status_or).ValueOrDie();
+    std::string temp_string =
+        "IsTransDot, InferDotOpShape:  operand1 = " + lhs_trans->name() +
+        " shape = " + lhs_trans->shape().ToString() +
+        " operand2 = " + rhs_trans->name() +
+        " shape = " + rhs_trans->shape().ToString() +
+        " inferred_output_shape = " + output_shape.ToString();
+    DebugPrint("TransposeUnfolder::HandleDot", temp_string);
+
+    status_or = MakeDotHlo(lhs_trans, rhs_trans, dimension_numbers,
+                           dot->precision_config());
+    HloInstruction* new_dot = std::move(status_or).ValueOrDie();
+    InsertOldNewMap(dot, new_dot);
+    return ReplaceInstruction(dot, new_dot);
+  }
   return Status::OK();
 }
+Status TransposeUnfolder::HandleTranspose(HloInstruction* transpose) {
+  if (IsTransDot(transpose->operand(0))) {
+    HloInstruction* lhs = transpose->mutable_operand(0)->mutable_operand(1);
+    HloInstruction* rhs = transpose->mutable_operand(0)->mutable_operand(0);
+    const Shape lhs_shape = lhs->shape();
+    DotDimensionNumbers dimension_numbers;
+    dimension_numbers.add_lhs_contracting_dimensions(
+        lhs_shape.dimensions_size() == 1 ? 0 : 1);
+    dimension_numbers.add_rhs_contracting_dimensions(0);
 
-Status CleanupVisitor::HandleTranspose(HloInstruction* transpose) {
-  auto operand = transpose->mutable_operand(0);
-  if (std::is_sorted(transpose->dimensions().begin(),
-                     transpose->dimensions().end())) {
-    VLOG(10) << "deleting no-op transpose";
-    return ReplaceInstruction(transpose, operand);
-  }
+    auto shape_status_or = ShapeInference::InferDotOpShape(
+        lhs->shape(), rhs->shape(), dimension_numbers);
+    Shape output_shape = std::move(shape_status_or).ValueOrDie();
+    std::string temp_string =
+        "Operand IsTransDot, InferDotOpShape:  operand1 = " + lhs->name() +
+        " shape = " + lhs->shape().ToString() + " operand2 = " + rhs->name() +
+        " shape = " + rhs->shape().ToString() +
+        " inferred_output_shape = " + output_shape.ToString();
+    DebugPrint("TransposeUnfolder::HandleTranspose", temp_string);
 
-  if (HloOpcode::kTranspose == operand->opcode()) {
-    return ReplaceWithNewInstruction(
-        transpose, HloInstruction::CreateTranspose(
-                       transpose->shape(), operand->mutable_operand(0),
-                       ComposePermutations(operand->dimensions(),
-                                           transpose->dimensions())));
-  }
+    auto status_or = MakeDotHlo(lhs, rhs, dimension_numbers,
+                                transpose->operand(0)->precision_config());
+    HloInstruction* new_dot = std::move(status_or).ValueOrDie();
+    InsertOldNewMap(transpose, new_dot);
+    return ReplaceInstruction(transpose, new_dot);
 
-  if (operand->opcode() == HloOpcode::kRng && operand->user_count() == 1) {
-    *operand->mutable_shape() = transpose->shape();
-    return ReplaceInstruction(transpose, operand);
-  }
+  } else if (IsRegularDot(transpose->operand(0))) {
+    StatusOr<HloInstruction*> status_or = MakeTransposeHlo(
+        transpose->mutable_operand(0)->mutable_operand(1), {1, 0});
+    auto lhs_trans = std::move(status_or).ValueOrDie();
+    status_or = MakeTransposeHlo(
+        transpose->mutable_operand(0)->mutable_operand(0), {1, 0});
+    auto rhs_trans = std::move(status_or).ValueOrDie();
 
-  return Status::OK();
-}
-Status ParentsDetector::Preprocess(HloInstruction* hlo) {
-  // add operand-parents relation of current node and its operands in to
-  // global_operand_parent_map
-  for (auto op : hlo->operands()) {
-    if (global_operand_parent_map.contains(op)) {
-      global_operand_parent_map[op].emplace_back(hlo);
-    } else {
-      global_operand_parent_map.insert({op, {hlo}});
-    }
+    const Shape lhs_shape = lhs_trans->shape();
+    DotDimensionNumbers dimension_numbers;
+    dimension_numbers.add_lhs_contracting_dimensions(
+        lhs_shape.dimensions_size() == 1 ? 0 : 1);
+    dimension_numbers.add_rhs_contracting_dimensions(0);
+
+    auto shape_status_or = ShapeInference::InferDotOpShape(
+        lhs_trans->shape(), rhs_trans->shape(), dimension_numbers);
+    Shape output_shape = std::move(shape_status_or).ValueOrDie();
+    std::string temp_string =
+        "Operand IsRegularDot, InferDotOpShape:  operand1 = " +
+        lhs_trans->name() + " shape = " + lhs_trans->shape().ToString() +
+        " operand2 = " + rhs_trans->name() +
+        " shape = " + rhs_trans->shape().ToString() +
+        " inferred_output_shape = " + output_shape.ToString();
+    DebugPrint("TransposeUnfolder::HandleTranspose", temp_string);
+
+    status_or = MakeDotHlo(lhs_trans, rhs_trans, dimension_numbers,
+                           transpose->operand(0)->precision_config());
+    HloInstruction* new_dot = std::move(status_or).ValueOrDie();
+    InsertOldNewMap(transpose, new_dot);
+    return ReplaceInstruction(transpose, new_dot);
+  } else if (transpose->operand(0)->opcode() == HloOpcode::kTranspose) {
+    std::string temp_string =
+        "Operand IsTranspose, operand = : " +
+        transpose->operand(0)->operand(0)->name() +
+        " shape = " + transpose->operand(0)->operand(0)->shape().ToString();
+    DebugPrint("TransposeUnfolder::HandleTranspose", temp_string);
+    InsertOldNewMap(transpose,
+                    transpose->mutable_operand(0)->mutable_operand(0));
+    return ReplaceInstruction(
+        transpose, transpose->mutable_operand(0)->mutable_operand(0));
   }
   return Status::OK();
 }
@@ -296,7 +473,6 @@ Status ChainRecorder::Preprocess(HloInstruction* hlo) {
   return Status::OK();
 }
 Status MatrixChainDetector::DetectMatrixChain(HloInstruction* chain_root) {
-  // TOOD: 把这个地方封装一下
   std::deque<HloInstruction*> chain_roots{chain_root};
   while (!chain_roots.empty()) {
     HloInstruction* cur_root = chain_roots.front();
@@ -304,21 +480,7 @@ Status MatrixChainDetector::DetectMatrixChain(HloInstruction* chain_root) {
     DebugPrint("MatrixChainDetector::MatrixChainDetector",
                "Find a new chain_root:" + cur_root->name());
     ChainRecorder chain_recorder(cur_root);
-    auto status_or = DetectMatrixChainPreorderDFS(cur_root, &chain_recorder);
-    std::deque<HloInstruction*> new_copied_chain_roots =
-        std::move(status_or).ValueOrDie();
-    DebugPrint("MatrixChainDetector::MatrixChainDetector",
-               "new_copied_chain_roots.size() = " +
-                   std::to_string(new_copied_chain_roots.size()));
-    // also needs to optimize new copied matrix chains
-    DebugPrint("MatrixChainDetector::MatrixChainDetector",
-               "Before insert chain_roots.size() = " +
-                   std::to_string(chain_roots.size()));
-    chain_roots.insert(chain_roots.end(), new_copied_chain_roots.begin(),
-                       new_copied_chain_roots.end());
-    DebugPrint("MatrixChainDetector::MatrixChainDetector",
-               "After insert chain_roots.size() = " +
-                   std::to_string(chain_roots.size()));
+    auto status = DetectMatrixChainPreorderDFS(cur_root, &chain_recorder);
 
     auto chain = chain_recorder.GetChain(cur_root);
     DebugPrint(
@@ -375,11 +537,6 @@ Status MatrixChainDetector::Preprocess(HloInstruction* hlo) {
     if (hlo != hlo->parent()->root_instruction()) {
       return Status::OK();
     } else {
-      // 比如一种情况，root是dot，但是其中一个分支有一个operand不是这个chain了，
-      // 但是这个operand的后代中又有chain.
-      //
-      // 刚刚细想了一下又觉得这么处理是可以的，因为MatrixChainDetector是postorder，所以当处理到root时
-      // 其他子节点的chain一定已经被检测并优化了
       DebugPrint("MatrixChainDetector::Preprocess",
                  "root_instruction is dot, inst.name:" + hlo->name() +
                      " opcode = " + HloOpcodeString(hlo->opcode()));
@@ -420,11 +577,8 @@ Status MatrixChainDetector::Preprocess(HloInstruction* hlo) {
 }
 
 StatusOr<HloInstruction*> HloMCO::CopyResuableSubgraph(HloInstruction* inst) {
+  // deprecated
   std::vector<HloInstruction*> users;
-  // TODO:
-  // 并不能直接随便选取要替换的parent，而是应该替换掉除了当前分支parent之外的
-  // 如果替换了当前分支的parent，那么就会造成有一个没有访问的parent仍然指向这个节点，但是应该是指向
-  // clone的节点的，就会造成哪个
   users.assign(inst->users().begin() + 1, inst->users().end());
   HloInstruction* new_inst = inst->parent()->AddInstruction(inst->Clone());
   inst->ReplaceUsesWith(users, new_inst);
@@ -458,14 +612,6 @@ Status HloMCO::ConstructOptimalChainHelper(
           std::to_string(start_index) + "," + std::to_string(end_index) + ") " +
           "subgraph_stack.size = " + std::to_string(subgraph_stack.size()));
   auto create_dot = [&](HloInstruction* l, HloInstruction* r) {
-    // DebugPrint();
-
-    //     std::cout
-    // << "[HloMCO::ConstructOptimalChainHelper::create_dot] "
-    // << "Start: "
-    // << " operand1 = " << l->name() << " shape = " << l->shape().ToString()
-    // << " operand2 = " << r->name() + " shape = " << r->shape().ToString()
-    // << std::endl;
     std::string temp_string = "Start:  operand1 = " + l->name() +
                               " shape = " + l->shape().ToString() +
                               " operand2 = " + r->name() +
@@ -480,11 +626,6 @@ Status HloMCO::ConstructOptimalChainHelper(
                                                      dimension_numbers);
     Shape output_shape = std::move(status_or).ValueOrDie();
 
-    // TF_ASSIGN_OR_RETURN(
-    //     auto output_shape,
-    //     ShapeInference::InferDotOpShape(
-    //         chain_instructions[start_index]->shape(),
-    //         chain_instructions[end_index]->shape(), dimension_numbers));
     temp_string = "InferDotOpShape:  operand1 = " + l->name() +
                   " shape = " + l->shape().ToString() +
                   " operand2 = " + r->name() +
@@ -492,11 +633,6 @@ Status HloMCO::ConstructOptimalChainHelper(
                   " inferred_output_shape = " + output_shape.ToString();
     DebugPrint("HloMCO::ConstructOptimalChainHelper::create_dot", temp_string);
 
-    // auto new_matmul_inst_ptr = HloInstruction::CreateDot(
-    //     output_shape, l, r, dimension_numbers, l->precision_config());
-    // TODO:
-    // 感觉bug的原因可能是因为这个CreateDot产生的是个临时变量？然后后续返回后就失效了
-    // 所以是不是应该把subgraph_stack改成存stack
     // for newly created instruction, we need to save it to the computation
     HloInstruction* new_matmul_inst_ptr = l->parent()->AddInstruction(
         HloInstruction::CreateDot(output_shape, l, r, dimension_numbers,
@@ -591,7 +727,7 @@ StatusOr<HloInstruction*> HloMCO::ComputeOptimalChainOrder(
     CHECK_LE(chain[i]->shape().rank(), 2);
     if (chain[i]->shape().rank() == 1) {
       // vector operand
-      // TODO: a vector in XLA is row vector or column vector? For now consider
+      // a vector in XLA is row vector or column vector? For now consider
       // it as column vector
       sizes[i] = chain[i]->shape().dimensions(0);
       sizes[i + 1] = 1;
@@ -684,16 +820,18 @@ StatusOr<bool> HloMCO::Run(HloModule* module) {
         "Module entry computation cannot be a fusion computation");
   }
   DebugPrint("HloMCO::Run", "Start Run");
-  // std::cout << "[HloMCO::Run]:\n" << hlo_text << std::endl;
-  for (auto* computation : module->computations()) {
+  for (auto* computation : module->MakeNonfusionComputations()) {
     DebugPrint("HloMCO::Run", "computation: " + computation->ToString());
-    DebugPrint("HloMCO::Run", "start cleanup_visitor");
-    CleanupVisitor cleanup_visitor;
-    TF_RETURN_IF_ERROR(computation->Accept(&cleanup_visitor));
+    // DebugPrint("HloMCO::Run", "start cleanup_visitor");
+    // CleanupVisitor cleanup_visitor;
+    // TF_RETURN_IF_ERROR(computation->Accept(&cleanup_visitor));
+
+    TransposeUnfolder transpose_unfolder;
+    DebugPrint("HloMCO::Run", "start transpose_unfolder");
+    PreOrderAccept(computation, &transpose_unfolder, changed);
     DebugPrint("HloMCO::Run", "start matriox_chain_detector");
     MatrixChainDetector matrix_chain_detector;
-    // detection matrix chain on the whithin the computation
-    // TF_RETURN_IF_ERROR(computation->Accept(&instruction_verifier));
+    // detection matrix chain on the whithin the computation;
     TF_RETURN_IF_ERROR(computation->Accept(&matrix_chain_detector));
     DebugPrint("HloMCO::Run", "finish matriox_chain_detector");
     auto chain_map = matrix_chain_detector.GetChainMap();

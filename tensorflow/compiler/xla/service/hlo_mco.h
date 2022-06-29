@@ -51,23 +51,6 @@ class HloMCO : public HloModulePass {
   PrecisionConfig precision_config_;
 };
 
-class ParentsDetector : public DfsHloVisitorWithDefault {
- public:
-  ParentsDetector() {}
-  Status DefaultAction(HloInstruction* hlo) override { return Status::OK(); }
-  Status Preprocess(HloInstruction* hlo) override;
-  Status FinishVisit(HloInstruction* hlo) override { return Status::OK(); }
-  const absl::flat_hash_map<HloInstruction*, std::vector<HloInstruction*>>
-  GetGlobalOperandParentMap() {
-    return global_operand_parent_map;
-  }
-
- private:
-  // Each kv pair is (instruction_ptr, vector<parent_instruction_ptr>)
-  absl::flat_hash_map<HloInstruction*, std::vector<HloInstruction*>>
-      global_operand_parent_map;
-};
-
 class ChainRecorder : public DfsHloVisitorWithDefault {
  public:
   ChainRecorder(HloInstruction* input_chain_root)
@@ -119,11 +102,20 @@ class MatrixChainDetector : public DfsHloVisitorWithDefault {
   // Each kv pair is (chain_root_ptr, vector<chain_instruction_ptr>)
   absl::flat_hash_map<HloInstruction*, std::vector<HloInstruction*>> chain_map;
 };
-class CleanupVisitor : public DfsHloRewriteVisitor {
+
+class TransposeUnfolder : public DfsHloRewriteVisitor {
  public:
-  Status HandleReshape(HloInstruction* reshape) override;
+  Status HandleDot(HloInstruction* reshape) override;
   Status HandleTranspose(HloInstruction* transpose) override;
-  bool SameShape(const HloInstruction* lhs, const HloInstruction* rhs) const;
+  bool OldNewMapContain(HloInstruction* old_inst);
+  HloInstruction* GetNewInst(HloInstruction* old_inst);
+  bool DeleteOldInst(HloInstruction* old_inst);
+private:
+  bool IsTransDot(const HloInstruction* hlo);
+  bool IsRegularDot(const HloInstruction* hlo);
+  absl::flat_hash_map<HloInstruction*, HloInstruction*> old_new_inst_map;
+  void InsertOldNewMap(HloInstruction* old_inst, HloInstruction* new_inst);
+  
 };
 
 }  // namespace xla
