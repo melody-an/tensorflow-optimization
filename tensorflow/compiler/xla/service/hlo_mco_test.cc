@@ -249,11 +249,11 @@ main{
                       render_graph(RenderedGraphFormat::kDot));
   HloMCO pass;
   ASSERT_TRUE(pass.Run(m.get()).ValueOrDie());
-  AlgebraicSimplifierOptions default_options_;
-  AlgebraicSimplifier simplifier(default_options_);
-  simplifier.Run(m.get()).ValueOrDie();
-  TransposeFolding transpose_folding;
-  transpose_folding.Run(m.get()).ValueOrDie();
+  // AlgebraicSimplifierOptions default_options_;
+  // AlgebraicSimplifier simplifier(default_options_);
+  // simplifier.Run(m.get()).ValueOrDie();
+  // TransposeFolding transpose_folding;
+  // transpose_folding.Run(m.get()).ValueOrDie();
   HloDCE dce;
   RunHloPass(&dce, m.get());
   HloCSE cse(/*is_layout_sensitive=*/false);
@@ -562,6 +562,116 @@ main{
   simplifier.Run(m.get()).ValueOrDie();
   TransposeFolding transpose_folding;
   transpose_folding.Run(m.get()).ValueOrDie();
+  HloDCE dce;
+  RunHloPass(&dce, m.get());
+  HloCSE cse(/*is_layout_sensitive=*/false);
+  cse.Run(m.get()).ValueOrDie();
+  HloInstruction* root = m->entry_computation()->root_instruction();
+  printf("After opotimization:\n %f\n", m->ToString().c_str());
+
+  filename = TestName() + "_after_opotimization";
+  std::cout << "Start Dumping " << filename << " to " << dir;
+  DumpToFileInDirImpl(dir, absl::StrFormat("%s.dot", filename),
+                      render_graph(RenderedGraphFormat::kDot));
+}
+
+TEST_F(HloMCOTest, OptimalMatrixVectorTransDotChain) {
+  // Test opotimization in graph which rewrites transpose op to dot op with
+  // contract dimensions{lhs=0,rhs=1}
+  auto builder = HloComputation::Builder(TestName());
+  const std::string hlo_text = R"(
+HloModule OptimalMatrixVectorTransDotChain
+main{
+  %D = f32[10,30]{1,0} parameter(3), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %A = f32[40,20]{1,0} parameter(0), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %B = f32[20]{0} parameter(1), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %dot.9 = f32[40]{0} dot(f32[40,20]{1,0} %A, f32[20]{0} %B), lhs_contracting_dims={1}, rhs_contracting_dims={0}, metadata={op_type="Einsum" op_name="einsum/Einsum"}
+  %C = f32[40,30]{1,0} parameter(2), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %dot.11 = f32[30]{0} dot(f32[40]{0} %dot.9, f32[40,30]{1,0} %C), lhs_contracting_dims={0}, rhs_contracting_dims={0}, metadata={op_type="Einsum" op_name="einsum_1/Einsum"}
+  ROOT %dot.13 = f32[10]{0} dot(f32[10,30]{1,0} %D, f32[30]{0} %dot.11), lhs_contracting_dims={1}, rhs_contracting_dims={0}, metadata={op_type="Einsum" op_name="einsum_2/Einsum"}
+}
+)";
+
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> m,
+                          ParseAndReturnVerifiedModule(hlo_text));
+  std::string dir = "/vol/bitbucket/ya321/codes/MscProject/test_output/";
+  std::string filename = TestName() + "_before_opotimization";
+  // DebugOptions debug_options
+  auto render_graph = [&](RenderedGraphFormat format) {
+    StatusOr<string> rendered_graph =
+        RenderGraph(*m->entry_computation(),
+                    /*label=*/filename, m->config().debug_options(), format);
+    if (rendered_graph.ok()) {
+      return std::move(rendered_graph).ValueOrDie();
+    }
+    return absl::StrFormat("Error rendering graph: %s",
+                           rendered_graph.status().ToString());
+  };
+  std::cout << "Start Dumping " << filename << " to " << dir;
+  DumpToFileInDirImpl(dir, absl::StrFormat("%s.dot", filename),
+                      render_graph(RenderedGraphFormat::kDot));
+  HloMCO pass;
+  ASSERT_TRUE(pass.Run(m.get()).ValueOrDie());
+  // AlgebraicSimplifierOptions default_options_;
+  // AlgebraicSimplifier simplifier(default_options_);
+  // simplifier.Run(m.get()).ValueOrDie();
+  // TransposeFolding transpose_folding;
+  // transpose_folding.Run(m.get()).ValueOrDie();
+  HloDCE dce;
+  RunHloPass(&dce, m.get());
+  HloCSE cse(/*is_layout_sensitive=*/false);
+  cse.Run(m.get()).ValueOrDie();
+  HloInstruction* root = m->entry_computation()->root_instruction();
+  printf("After opotimization:\n %f\n", m->ToString().c_str());
+
+  filename = TestName() + "_after_opotimization";
+  std::cout << "Start Dumping " << filename << " to " << dir;
+  DumpToFileInDirImpl(dir, absl::StrFormat("%s.dot", filename),
+                      render_graph(RenderedGraphFormat::kDot));
+}
+
+TEST_F(HloMCOTest, MatrixVectorTransDotChain) {
+  // Test opotimization in graph which rewrites transpose op to dot op with
+  // contract dimensions{lhs=0,rhs=1}
+  auto builder = HloComputation::Builder(TestName());
+  const std::string hlo_text = R"(
+HloModule MatrixVectorTransDotChain
+main{
+  %arg3.4 = f32[10,30]{1,0} parameter(3), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %arg2.3 = f32[40,30]{1,0} parameter(2), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %dot = f32[10,40]{1,0} dot(f32[10,30]{1,0} %arg3.4, f32[40,30]{1,0} %arg2.3), lhs_contracting_dims={1}, rhs_contracting_dims={1}, metadata={op_type="MatMul" op_name="matmul"}
+  %arg0.1 = f32[40,20]{1,0} parameter(0), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %arg1.2 = f32[20]{0} parameter(1), parameter_replication={false}, metadata={op_name="XLA_Args"}
+  %dot.9 = f32[40]{0} dot(f32[40,20]{1,0} %arg0.1, f32[20]{0} %arg1.2), lhs_contracting_dims={1}, rhs_contracting_dims={0}, metadata={op_type="Einsum" op_name="einsum/Einsum"}
+  ROOT %dot.14 = f32[10]{0} dot(f32[10,40]{1,0} %dot, f32[40]{0} %dot.9), lhs_contracting_dims={1}, rhs_contracting_dims={0}, metadata={op_type="Einsum" op_name="einsum_1/Einsum"}
+}
+)";
+
+  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> m,
+                          ParseAndReturnVerifiedModule(hlo_text));
+  std::string dir = "/vol/bitbucket/ya321/codes/MscProject/test_output/";
+  std::string filename = TestName() + "_before_opotimization";
+  // DebugOptions debug_options
+  auto render_graph = [&](RenderedGraphFormat format) {
+    StatusOr<string> rendered_graph =
+        RenderGraph(*m->entry_computation(),
+                    /*label=*/filename, m->config().debug_options(), format);
+    if (rendered_graph.ok()) {
+      return std::move(rendered_graph).ValueOrDie();
+    }
+    return absl::StrFormat("Error rendering graph: %s",
+                           rendered_graph.status().ToString());
+  };
+  std::cout << "Start Dumping " << filename << " to " << dir;
+  DumpToFileInDirImpl(dir, absl::StrFormat("%s.dot", filename),
+                      render_graph(RenderedGraphFormat::kDot));
+  HloMCO pass;
+  ASSERT_TRUE(pass.Run(m.get()).ValueOrDie());
+  // AlgebraicSimplifierOptions default_options_;
+  // AlgebraicSimplifier simplifier(default_options_);
+  // simplifier.Run(m.get()).ValueOrDie();
+  // TransposeFolding transpose_folding;
+  // transpose_folding.Run(m.get()).ValueOrDie();
   HloDCE dce;
   RunHloPass(&dce, m.get());
   HloCSE cse(/*is_layout_sensitive=*/false);

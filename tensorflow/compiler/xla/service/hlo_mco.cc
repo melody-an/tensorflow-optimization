@@ -192,9 +192,9 @@ static Status DetectMatrixChainPreorderDFS(
 
 // perform a pre-order DFS and rewrite nodes during traversal
 // template <typename Visitor>
-static Status TransUnfolderPreorderDFSRewriter(
-    HloInstruction* root, TransposeUnfolder* visitor, bool& changed,
-    bool ignore_control_predecessors = false) {
+static Status PreorderDFSRewriter(HloInstruction* root,
+                                  TransposeUnfolder* visitor, bool& changed,
+                                  bool ignore_control_predecessors = false) {
   // Calculating the instruction count within a module can be expensive on large
   // models so only do it if the visit state is empty. This will help when the
   // same visitor is reused across many computations of a single module.
@@ -211,7 +211,7 @@ static Status TransUnfolderPreorderDFSRewriter(
   DFSStack dfs_stack;
   dfs_stack.emplace_back(root->unique_id(), root);
   // used to record roots of new copied chains
-  DebugPrint("TransUnfolderPreorderDFSRewriter",
+  DebugPrint("PreorderDFSRewriter",
              "Start, root = " + root->name() +
                  "opcode = " + HloOpcodeString(root->opcode()));
 
@@ -221,22 +221,22 @@ static Status TransUnfolderPreorderDFSRewriter(
     int current_id = dfs_stack.back().first;
     HloInstruction* current_node = dfs_stack.back().second;
     CHECK_GE(current_id, 0)
-        << "[TransUnfolderPreorderDFSRewriter] " << current_id << ": "
-        << current_node << ": instruction may not have parent computation";
+        << "[PreorderDFSRewriter] " << current_id << ": " << current_node
+        << ": instruction may not have parent computation";
     typename TransposeUnfolder::VisitState visit_state =
         visitor->GetVisitState(current_id);
     if (visit_state == TransposeUnfolder::kVisited) {
       dfs_stack.pop_back();
-      VLOG(3) << "[TransUnfolderPreorderDFSRewriter] "
+      VLOG(3) << "[PreorderDFSRewriter] "
               << "Not visiting HLO (id = " << current_id
               << ") as it was already visited.";
       continue;
     }
 
     dfs_stack.pop_back();
-    VLOG(2) << "[TransUnfolderPreorderDFSRewriter] "
+    VLOG(2) << "[PreorderDFSRewriter] "
             << "Visiting HLO %" << current_node->name();
-    DebugPrint("TransUnfolderPreorderDFSRewriter",
+    DebugPrint("PreorderDFSRewriter",
                "Visiting HLO = " + current_node->name() +
                    " opcode = " + HloOpcodeString(current_node->opcode()));
     TF_RETURN_IF_ERROR(visitor->Preprocess(current_node));
@@ -245,14 +245,14 @@ static Status TransUnfolderPreorderDFSRewriter(
     TF_RETURN_IF_ERROR(visitor->Postprocess(current_node));
     if (visitor->OldNewMapContain(current_node)) {
       auto tmp = current_node;
-      DebugPrint("TransUnfolderPreorderDFSRewriter",
+      DebugPrint("PreorderDFSRewriter",
                  "Before replace current_node = " + current_node->name() +
                      " opcode = " + HloOpcodeString(current_node->opcode()) +
                      " OldNewMapContain() = " +
                      std::to_string(visitor->OldNewMapContain(tmp)));
       current_node = visitor->GetNewInst(current_node);
       visitor->DeleteOldInst(tmp);
-      DebugPrint("TransUnfolderPreorderDFSRewriter",
+      DebugPrint("PreorderDFSRewriter",
                  "Before replace current_node = " + current_node->name() +
                      " opcode = " + HloOpcodeString(current_node->opcode()) +
                      " OldNewMapContain() = " +
@@ -260,7 +260,7 @@ static Status TransUnfolderPreorderDFSRewriter(
       changed |= true;
     }
     DebugPrint(
-        "TransUnfolderPreorderDFSRewriter",
+        "PreorderDFSRewriter",
         "current_node = " + current_node->name() +
             " opcode = " + HloOpcodeString(current_node->opcode()) +
             " users.size = " + std::to_string(current_node->users().size()));
@@ -270,12 +270,12 @@ static Status TransUnfolderPreorderDFSRewriter(
       if (!TF_PREDICT_TRUE(PushDFSChild(visitor, &dfs_stack, child))) {
         PrintCycle(child, &dfs_stack);
         return FailedPrecondition(
-            "TransUnfolderPreorderDFSRewriter A cycle is detected while "
+            "PreorderDFSRewriter A cycle is detected while "
             "visiting "
             "instruction %s",
             current_node->ToString());
       }
-      DebugPrint("TransUnfolderPreorderDFSRewriter",
+      DebugPrint("PreorderDFSRewriter",
                  "current_node = " + current_node->name() +
                      " opcode = " + HloOpcodeString(current_node->opcode()) +
                      " Add Child " + child->name() +
@@ -292,8 +292,7 @@ static Status TransUnfolderPreorderDFSRewriter(
 
 Status PreOrderAccept(HloComputation* computation, TransposeUnfolder* visitor,
                       bool& changed) {
-  return TransUnfolderPreorderDFSRewriter(computation->root_instruction(),
-                                          visitor, changed);
+  return PreorderDFSRewriter(computation->root_instruction(), visitor, changed);
 }
 
 }  // namespace
@@ -325,17 +324,38 @@ bool TransposeUnfolder::IsTransDot(const HloInstruction* hlo) {
     return false;
   }
   const DotDimensionNumbers& dnums = hlo->dot_dimension_numbers();
-
   if (dnums.lhs_contracting_dimensions_size() != 1 ||
       dnums.rhs_contracting_dimensions_size() != 1 ||
       dnums.lhs_batch_dimensions_size() != 0 ||
       dnums.rhs_batch_dimensions_size() != 0 ||
-      hlo->shape().dimensions_size() != 2 ||
-      *(dnums.lhs_contracting_dimensions().begin()) != 0 ||
-      *(dnums.rhs_contracting_dimensions().begin()) != 1) {
+      hlo->shape().dimensions_size() > 2 ||
+      hlo->shape().dimensions_size() == 0) {
+    // not m-m, m-v dot
+    // donot need to handle v-v dot
     return false;
   }
-  return true;
+  if (*(dnums.lhs_contracting_dimensions().begin()) == 1 &&
+      *(dnums.rhs_contracting_dimensions().begin()) == 0) {
+    // regular m-m or m-v dot
+    return false;
+  }
+
+  if (*(dnums.lhs_contracting_dimensions().begin()) == 0 &&
+      *(dnums.rhs_contracting_dimensions().begin()) == 1) {
+    // m-m actual expression : N transdot M = N^T @ M^T
+    return true;
+  }
+  if (*(dnums.lhs_contracting_dimensions().begin()) == 0 &&
+      *(dnums.rhs_contracting_dimensions().begin()) == 0) {
+    // m-v trans dot actual expression : v transdot M = M^T @ v
+    return true;
+  }
+  if (*(dnums.lhs_contracting_dimensions().begin()) == 1 &&
+      *(dnums.rhs_contracting_dimensions().begin()) == 1) {
+    // m-m actual expression : M transdot N = M @ N^T
+    return true;
+  }
+  return false;
 }
 bool TransposeUnfolder::IsRegularDot(const HloInstruction* hlo) {
   if (hlo->opcode() != HloOpcode::kDot) {
@@ -347,44 +367,114 @@ bool TransposeUnfolder::IsRegularDot(const HloInstruction* hlo) {
       dnums.rhs_contracting_dimensions_size() != 1 ||
       dnums.lhs_batch_dimensions_size() != 0 ||
       dnums.rhs_batch_dimensions_size() != 0 ||
-      hlo->shape().dimensions_size() != 2 ||
-      *(dnums.lhs_contracting_dimensions().begin()) != 1 ||
-      *(dnums.rhs_contracting_dimensions().begin()) != 0) {
+      hlo->shape().dimensions_size() > 2 ||
+      hlo->shape().dimensions_size() == 0) {
     return false;
   }
-  return true;
+  if (*(dnums.lhs_contracting_dimensions().begin()) == 1 &&
+      *(dnums.rhs_contracting_dimensions().begin()) == 0) {
+    // m-m or m-v dot
+    return true;
+  }
+  return false;
 }
 Status TransposeUnfolder::HandleDot(HloInstruction* dot) {
   if (IsTransDot(dot)) {
-    StatusOr<HloInstruction*> status_or =
-        MakeTransposeHlo(dot->mutable_operand(0), {1, 0});
-    auto lhs_trans = std::move(status_or).ValueOrDie();
-    status_or = MakeTransposeHlo(dot->mutable_operand(1), {1, 0});
-    auto rhs_trans = std::move(status_or).ValueOrDie();
-    // cur_node = replace(cur_node, create_dot(trans_op0, trans_op1))
+    const DotDimensionNumbers& dnums = dot->dot_dimension_numbers();
+    if (*(dnums.lhs_contracting_dimensions().begin()) == 0 &&
+        *(dnums.rhs_contracting_dimensions().begin()) == 0) {
+      // actual expression : v transdot M = M^T @ v
+      StatusOr<HloInstruction*> status_or =
+          MakeTransposeHlo(dot->mutable_operand(1), {1, 0});
+      auto lhs_trans = std::move(status_or).ValueOrDie();
+      status_or = MakeTransposeHlo(dot->mutable_operand(0), {0});
+      auto rhs_trans = std::move(status_or).ValueOrDie();
 
-    const Shape lhs_shape = lhs_trans->shape();
-    DotDimensionNumbers dimension_numbers;
-    dimension_numbers.add_lhs_contracting_dimensions(
-        lhs_shape.dimensions_size() == 1 ? 0 : 1);
-    dimension_numbers.add_rhs_contracting_dimensions(0);
+      const Shape lhs_shape = lhs_trans->shape();
+      DotDimensionNumbers dimension_numbers;
+      dimension_numbers.add_lhs_contracting_dimensions(
+          lhs_shape.dimensions_size() == 1 ? 0 : 1);
+      dimension_numbers.add_rhs_contracting_dimensions(0);
 
-    auto shape_status_or = ShapeInference::InferDotOpShape(
-        lhs_trans->shape(), rhs_trans->shape(), dimension_numbers);
-    Shape output_shape = std::move(shape_status_or).ValueOrDie();
-    std::string temp_string =
-        "IsTransDot, InferDotOpShape:  operand1 = " + lhs_trans->name() +
-        " shape = " + lhs_trans->shape().ToString() +
-        " operand2 = " + rhs_trans->name() +
-        " shape = " + rhs_trans->shape().ToString() +
-        " inferred_output_shape = " + output_shape.ToString();
-    DebugPrint("TransposeUnfolder::HandleDot", temp_string);
+      auto shape_status_or = ShapeInference::InferDotOpShape(
+          lhs_trans->shape(), rhs_trans->shape(), dimension_numbers);
+      Shape output_shape = std::move(shape_status_or).ValueOrDie();
+      std::string temp_string =
+          "IsTransDot, (M*v)^T InferDotOpShape:  operand1 = " +
+          lhs_trans->name() + " shape = " + lhs_trans->shape().ToString() +
+          " operand2 = " + rhs_trans->name() +
+          " shape = " + rhs_trans->shape().ToString() +
+          " inferred_output_shape = " + output_shape.ToString();
+      DebugPrint("TransposeUnfolder::HandleDot", temp_string);
 
-    status_or = MakeDotHlo(lhs_trans, rhs_trans, dimension_numbers,
-                           dot->precision_config());
-    HloInstruction* new_dot = std::move(status_or).ValueOrDie();
-    InsertOldNewMap(dot, new_dot);
-    return ReplaceInstruction(dot, new_dot);
+      status_or = MakeDotHlo(lhs_trans, rhs_trans, dimension_numbers,
+                             dot->precision_config());
+      HloInstruction* new_dot = std::move(status_or).ValueOrDie();
+      InsertOldNewMap(dot, new_dot);
+      return ReplaceInstruction(dot, new_dot);
+
+    } else if (*(dnums.lhs_contracting_dimensions().begin()) == 1 &&
+               *(dnums.rhs_contracting_dimensions().begin()) == 1) {
+      // m-m actual expression : M transdot N = M @ N^T
+      auto lhs = dot->mutable_operand(0);
+      auto status_or = MakeTransposeHlo(dot->mutable_operand(1), {1, 0});
+      auto rhs_trans = std::move(status_or).ValueOrDie();
+      // cur_node = replace(cur_node, create_dot(trans_op0, trans_op1))
+
+      const Shape lhs_shape = lhs->shape();
+      DotDimensionNumbers dimension_numbers;
+      dimension_numbers.add_lhs_contracting_dimensions(
+          lhs_shape.dimensions_size() == 1 ? 0 : 1);
+      dimension_numbers.add_rhs_contracting_dimensions(0);
+
+      auto shape_status_or = ShapeInference::InferDotOpShape(
+          lhs->shape(), rhs_trans->shape(), dimension_numbers);
+      Shape output_shape = std::move(shape_status_or).ValueOrDie();
+      std::string temp_string =
+          "IsTransDot, (M*N)^T InferDotOpShape:  operand1 = " + lhs->name() +
+          " shape = " + lhs->shape().ToString() +
+          " operand2 = " + rhs_trans->name() +
+          " shape = " + rhs_trans->shape().ToString() +
+          " inferred_output_shape = " + output_shape.ToString();
+      DebugPrint("TransposeUnfolder::HandleDot", temp_string);
+
+      status_or = MakeDotHlo(lhs, rhs_trans, dimension_numbers,
+                             dot->precision_config());
+      HloInstruction* new_dot = std::move(status_or).ValueOrDie();
+      InsertOldNewMap(dot, new_dot);
+      return ReplaceInstruction(dot, new_dot);
+    } else {
+      // m-m actual expression : N transdot M = N^T @ M^T
+      StatusOr<HloInstruction*> status_or =
+          MakeTransposeHlo(dot->mutable_operand(0), {1, 0});
+      auto lhs_trans = std::move(status_or).ValueOrDie();
+      status_or = MakeTransposeHlo(dot->mutable_operand(1), {1, 0});
+      auto rhs_trans = std::move(status_or).ValueOrDie();
+      // cur_node = replace(cur_node, create_dot(trans_op0, trans_op1))
+
+      const Shape lhs_shape = lhs_trans->shape();
+      DotDimensionNumbers dimension_numbers;
+      dimension_numbers.add_lhs_contracting_dimensions(
+          lhs_shape.dimensions_size() == 1 ? 0 : 1);
+      dimension_numbers.add_rhs_contracting_dimensions(0);
+
+      auto shape_status_or = ShapeInference::InferDotOpShape(
+          lhs_trans->shape(), rhs_trans->shape(), dimension_numbers);
+      Shape output_shape = std::move(shape_status_or).ValueOrDie();
+      std::string temp_string =
+          "IsTransDot, (M*N)^T InferDotOpShape:  operand1 = " +
+          lhs_trans->name() + " shape = " + lhs_trans->shape().ToString() +
+          " operand2 = " + rhs_trans->name() +
+          " shape = " + rhs_trans->shape().ToString() +
+          " inferred_output_shape = " + output_shape.ToString();
+      DebugPrint("TransposeUnfolder::HandleDot", temp_string);
+
+      status_or = MakeDotHlo(lhs_trans, rhs_trans, dimension_numbers,
+                             dot->precision_config());
+      HloInstruction* new_dot = std::move(status_or).ValueOrDie();
+      InsertOldNewMap(dot, new_dot);
+      return ReplaceInstruction(dot, new_dot);
+    }
   }
   return Status::OK();
 }
@@ -415,35 +505,45 @@ Status TransposeUnfolder::HandleTranspose(HloInstruction* transpose) {
     return ReplaceInstruction(transpose, new_dot);
 
   } else if (IsRegularDot(transpose->operand(0))) {
-    StatusOr<HloInstruction*> status_or = MakeTransposeHlo(
-        transpose->mutable_operand(0)->mutable_operand(1), {1, 0});
-    auto lhs_trans = std::move(status_or).ValueOrDie();
-    status_or = MakeTransposeHlo(
-        transpose->mutable_operand(0)->mutable_operand(0), {1, 0});
-    auto rhs_trans = std::move(status_or).ValueOrDie();
+    auto dnum_size = transpose->operand(0)->shape().dimensions_size();
+    DebugPrint("TransposeUnfolder::HandleTranspose",
+               "IsRegularDot, dnum_size = " + std::to_string(dnum_size));
+    if (dnum_size == 1) {
+      // m-v dot, do not need to transpose
+      return ReplaceInstruction(transpose, transpose->mutable_operand(0));
+    } else {
+      // m-m dot
+      StatusOr<HloInstruction*> status_or = MakeTransposeHlo(
+          transpose->mutable_operand(0)->mutable_operand(1), {1, 0});
+      auto lhs_trans = std::move(status_or).ValueOrDie();
+      status_or = MakeTransposeHlo(
+          transpose->mutable_operand(0)->mutable_operand(0), {1, 0});
+      auto rhs_trans = std::move(status_or).ValueOrDie();
 
-    const Shape lhs_shape = lhs_trans->shape();
-    DotDimensionNumbers dimension_numbers;
-    dimension_numbers.add_lhs_contracting_dimensions(
-        lhs_shape.dimensions_size() == 1 ? 0 : 1);
-    dimension_numbers.add_rhs_contracting_dimensions(0);
+      const Shape lhs_shape = lhs_trans->shape();
+      DotDimensionNumbers dimension_numbers;
+      dimension_numbers.add_lhs_contracting_dimensions(
+          lhs_shape.dimensions_size() == 1 ? 0 : 1);
+      dimension_numbers.add_rhs_contracting_dimensions(0);
 
-    auto shape_status_or = ShapeInference::InferDotOpShape(
-        lhs_trans->shape(), rhs_trans->shape(), dimension_numbers);
-    Shape output_shape = std::move(shape_status_or).ValueOrDie();
-    std::string temp_string =
-        "Operand IsRegularDot, InferDotOpShape:  operand1 = " +
-        lhs_trans->name() + " shape = " + lhs_trans->shape().ToString() +
-        " operand2 = " + rhs_trans->name() +
-        " shape = " + rhs_trans->shape().ToString() +
-        " inferred_output_shape = " + output_shape.ToString();
-    DebugPrint("TransposeUnfolder::HandleTranspose", temp_string);
+      auto shape_status_or = ShapeInference::InferDotOpShape(
+          lhs_trans->shape(), rhs_trans->shape(), dimension_numbers);
+      Shape output_shape = std::move(shape_status_or).ValueOrDie();
+      std::string temp_string =
+          "Operand IsRegularDot, InferDotOpShape:  operand1 = " +
+          lhs_trans->name() + " shape = " + lhs_trans->shape().ToString() +
+          " operand2 = " + rhs_trans->name() +
+          " shape = " + rhs_trans->shape().ToString() +
+          " inferred_output_shape = " + output_shape.ToString();
+      DebugPrint("TransposeUnfolder::HandleTranspose", temp_string);
 
-    status_or = MakeDotHlo(lhs_trans, rhs_trans, dimension_numbers,
-                           transpose->operand(0)->precision_config());
-    HloInstruction* new_dot = std::move(status_or).ValueOrDie();
-    InsertOldNewMap(transpose, new_dot);
-    return ReplaceInstruction(transpose, new_dot);
+      status_or = MakeDotHlo(lhs_trans, rhs_trans, dimension_numbers,
+                             transpose->operand(0)->precision_config());
+      HloInstruction* new_dot = std::move(status_or).ValueOrDie();
+      InsertOldNewMap(transpose, new_dot);
+      return ReplaceInstruction(transpose, new_dot);
+    }
+
   } else if (transpose->operand(0)->opcode() == HloOpcode::kTranspose) {
     std::string temp_string =
         "Operand IsTranspose, operand = : " +
@@ -508,7 +608,8 @@ bool MatrixChainDetector::CheckRealDot(HloInstruction* hlo) {
       dnums.rhs_batch_dimensions_size() != 0 ||
       *(dnums.lhs_contracting_dimensions().begin()) != 1 ||
       *(dnums.rhs_contracting_dimensions().begin()) != 0 ||
-      hlo->shape().dimensions_size() != 2) {
+      hlo->shape().dimensions_size() > 2 ||
+      hlo->shape().dimensions_size() == 0) {
     // since transpose op may be rewritten to dot op with
     // lhs_contracting_dimension = {0} rhs_contracting_dimension = {1}
     // such dot is actuall a tranpose and is not associative with other dots.
