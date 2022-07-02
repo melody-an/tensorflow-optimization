@@ -104,6 +104,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/hlo_proto_util.h"
 #include "tensorflow/compiler/xla/service/hlo_subcomputation_unification.h"
 #include "tensorflow/compiler/xla/service/hlo_verifier.h"
+#include "tensorflow/compiler/xla/service/hlo_mco.h"
 #include "tensorflow/compiler/xla/service/indexed_array_analysis.h"
 #include "tensorflow/compiler/xla/service/llvm_compiler.h"
 #include "tensorflow/compiler/xla/service/llvm_ir/llvm_util.h"
@@ -368,6 +369,7 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
     // TODO(b/134075051): Re-enable after b/134075051 is fixed.
     // pass.AddPass<SliceSinker>();
 
+    pass.AddPass<HloMCO>();
     pass.AddPass<HloDCE>();
     pass.AddPass<ReshapeMover>();
     pass.AddPass<HloConstantFolding>();
