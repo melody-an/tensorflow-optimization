@@ -185,6 +185,14 @@ limitations under the License.
 #include "tensorflow/core/platform/errors.h"
 #include "tensorflow/core/platform/status.h"
 #include "tensorflow/core/protobuf/error_codes.pb.h"
+#include "tensorflow/compiler/xla/service/tensor_splitter.h"
+#include "tensorflow/compiler/xla/service/tensor_splitter_v2.h"
+#include "tensorflow/compiler/xla/service/rce_optimizer.h"
+#include "tensorflow/compiler/xla/service/broadcast_simplifier.h"
+#include "tensorflow/compiler/xla/service/dot_order_optimizer.h"
+#include "tensorflow/compiler/xla/service/algebraic_rewriter.h"
+#include "tensorflow/compiler/xla/service/reshape_sinker.h"
+#include "tensorflow/compiler/xla/service/hlo_mco.h"
 
 namespace {
 
@@ -448,6 +456,20 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
   pipeline.AddPass<ZeroSizedHloElimination>();
 
   pipeline.AddPass<DynamicIndexSplitter>();
+
+  // TODO(dyedgreen): Figure out what the best place for this pass is ...
+  pipeline.AddPass<HloPassFix<RceOptimizer>>();
+  pipeline.AddPass<HloPassFix<BroadcastSimplifier>>();
+  pipeline.AddPass<HloPassFix<AlgebraicRewriter>>();
+  pipeline.AddPass<HloMCO>();
+  pipeline.AddPass<HloPassFix<DotOrderOptimizer>>();
+  pipeline.AddPass<HloPassFix<ReshapeSinker>>();
+  // ReshapeSinker may introduce new redundant reshape chain 
+  pipeline.AddPass<HloPassFix<RceOptimizer>>();
+  pipeline.AddPass<TensorSplitter>();
+  pipeline.AddPass<TensorSplitterV2>();
+  pipeline.AddPass<HloDCE>();  // splitter can cut out large chunks of the graph
+
 
   pipeline.AddPass<ConditionalToSelect>();
   pipeline.AddPass<MapInliner>();

@@ -685,7 +685,16 @@ Status ValidateDotDimensionNumbers(
         dimension_numbers.rhs_contracting_dimensions(i);
     if (lhs.dimensions(lhs_contracting_dimension) !=
         rhs.dimensions(rhs_contracting_dimension)) {
-      return fail("Contracting dimension sizes do not match.");
+      std::string info_str =
+          " lhs.contracting_dimension=" +
+          std::to_string(lhs_contracting_dimension) +
+          " lhs.contracting_dimension.size=" +
+          std::to_string(lhs.dimensions(lhs_contracting_dimension)) +
+          " rhs.contracting_dimension=" +
+          std::to_string(rhs_contracting_dimension) +
+          " rhs.contracting_dimension.size=" +
+          std::to_string(lhs.dimensions(rhs_contracting_dimension));
+      return fail("Contracting dimension sizes do not match." + info_str);
     }
   }
 

@@ -1071,7 +1071,7 @@ Status ShapeVerifier::HandleReshape(HloInstruction* reshape) {
   const Shape& operand_shape = reshape->operand(0)->shape();
   TF_RET_CHECK(SameElementType(reshape->shape(), operand_shape));
   TF_RET_CHECK(ShapeUtil::ElementsIn(reshape->shape()) ==
-               ShapeUtil::ElementsIn(operand_shape));
+               ShapeUtil::ElementsIn(operand_shape))<< reshape->ToString()<<" "<<reshape->operand(0)->ToString() << " operand shape " << operand_shape;
   return Status::OK();
 }
 

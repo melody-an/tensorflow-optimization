@@ -89,6 +89,8 @@ DebugOptions DefaultDebugOptionsIgnoringFlags() {
 
   // Set 4GB space limit for redzone scratch allocator.
   opts.set_xla_gpu_redzone_scratch_max_megabytes(1LL << 12);
+  opts.set_xla_tensor_size_threshold("1GB");
+  opts.set_xla_tensor_split_size("0B");
   return opts;
 }
 
@@ -727,6 +729,17 @@ static void AllocateFlags() {
           &DebugOptions::set_xla_gpu_redzone_scratch_max_megabytes),
       flag_values->xla_gpu_redzone_scratch_max_megabytes(),
       "Max size (in megabytes) for the GPU redzone scratch allocator."));
+  flag_objects->push_back(tensorflow::Flag(
+      "xla_tensor_size_threshold",
+      string_setter_for(&DebugOptions::set_xla_tensor_size_threshold),
+      flag_values->xla_tensor_size_threshold(),
+      "Threshold size in bytes for slitting compatible tensors."));
+  flag_objects->push_back(tensorflow::Flag(
+      "xla_tensor_split_size",
+      string_setter_for(&DebugOptions::set_xla_tensor_split_size),
+      flag_values->xla_tensor_split_size(),
+      "The value in bytes for splitting size of tensors. When the value is 0, "
+      "the value of xla_tensor_size_threshold is be used instead."));
 
   ParseFlagsFromEnvAndDieIfUnknown("XLA_FLAGS", *flag_objects);
 }  // NOLINT(readability/fn_size)

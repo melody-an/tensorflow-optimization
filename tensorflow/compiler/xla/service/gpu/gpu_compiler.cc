@@ -156,6 +156,14 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/while_loop_simplifier.h"
 #include "tensorflow/compiler/xla/service/while_loop_trip_count_annotator.h"
 #include "tensorflow/compiler/xla/service/zero_sized_hlo_elimination.h"
+#include "tensorflow/compiler/xla/service/tensor_splitter.h"
+#include "tensorflow/compiler/xla/service/tensor_splitter_v2.h"
+#include "tensorflow/compiler/xla/service/rce_optimizer.h"
+#include "tensorflow/compiler/xla/service/broadcast_simplifier.h"
+#include "tensorflow/compiler/xla/service/dot_order_optimizer.h"
+#include "tensorflow/compiler/xla/service/algebraic_rewriter.h"
+#include "tensorflow/compiler/xla/service/reshape_sinker.h"
+#include "tensorflow/compiler/xla/service/hlo_mco.h"
 #include "tensorflow/compiler/xla/status_macros.h"
 #include "tensorflow/compiler/xla/types.h"
 #include "tensorflow/compiler/xla/util.h"
@@ -461,6 +469,20 @@ Status GpuCompiler::OptimizeHloModule(
       // so far we know that 1mb is too small.
       pipeline.AddPass<DotMerger>(/*max_size_to_merge=*/int64_t{16} << 20);
       pipeline.AddPass<SortSimplifier>();
+
+  // TODO(dyedgreen): Figure out what the best place for this pass is ...
+      pipeline.AddPass<HloPassFix<RceOptimizer>>();
+      pipeline.AddPass<HloPassFix<BroadcastSimplifier>>();
+      pipeline.AddPass<HloPassFix<AlgebraicRewriter>>();
+      // pipeline.AddPass<AlgebraicRewriter>();
+      pipeline.AddPass<HloMCO>();
+      pipeline.AddPass<HloPassFix<DotOrderOptimizer>>();
+      pipeline.AddPass<HloPassFix<ReshapeSinker>>();
+      // ReshapeSinker may introduce new redundant reshape chain 
+      pipeline.AddPass<HloPassFix<RceOptimizer>>();
+      pipeline.AddPass<TensorSplitter>();
+      pipeline.AddPass<TensorSplitterV2>();
+
       pipeline.AddPass<TupleSimplifier>();
       pipeline.AddPass<WhileLoopConstantSinking>();
       pipeline.AddPass<WhileLoopSimplifier>();
