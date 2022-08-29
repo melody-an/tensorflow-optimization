@@ -1,7 +1,14 @@
 # eXLA-v2
 
-This project is built on top of TensorFlow, XLA and eXLA. So the basic usage and building steps follow https://www.tensorflow.org/install/source?hl=en#docker_linux_builds and https://www.tensorflow.org/xla. 
+This project is built on top of TensorFlow, XLA and eXLA. So the basic usage and building steps follow https://www.tensorflow.org/install/source?hl=en#setup_for_linux_and_macos and https://www.tensorflow.org/xla. 
 
+Note: As this project is an extension to eXLA, which is based on TensorFlow, the code base contains all the code of TensorFlow as well as the code of eXLA. The following files are new contributions to this project:
+* tensorflow/compiler/xla/service/hlo\_mco.h
+* tensorflow/compiler/xla/service/hlo\_mco.cc
+* tensorflow/compiler/xla/service/ reshape\_sinker.h
+* tensorflow/compiler/xla/service/reshape\_sinker.cc
+* tensorflow/compiler/xla/service/tensor\_splitter\_v2.h
+* tensorflow /compiler/xla/service/tensor\_splitter\_v2.cc
 
 ## Installation
 Here are a simplified version of building the project form scratch:
