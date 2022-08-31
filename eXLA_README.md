@@ -3,23 +3,24 @@
 This project is built on top of TensorFlow, XLA and eXLA. So the basic usage and building steps follow https://www.tensorflow.org/install/source?hl=en#setup_for_linux_and_macos and https://www.tensorflow.org/xla. 
 
 Note: As this project is an extension to eXLA, which is based on TensorFlow, the code base contains all the code of TensorFlow as well as the code of eXLA. The following files are new contributions to this project:
-* tensorflow/compiler/xla/service/hlo\_mco.h
-* tensorflow/compiler/xla/service/hlo\_mco.cc
-* tensorflow/compiler/xla/service/ reshape\_sinker.h
-* tensorflow/compiler/xla/service/reshape\_sinker.cc
-* tensorflow/compiler/xla/service/tensor\_splitter\_v2.h
-* tensorflow /compiler/xla/service/tensor\_splitter\_v2.cc
+* [tensorflow/compiler/xla/service/tensor\_splitter\_v2.h](https://github.com/melody-an/tensorflow-optimization/blob/r2.9/tensorflow/compiler/xla/service/tensor_splitter_v2.h)
+* [tensorflow/compiler/xla/service/tensor\_splitter\_v2.cc](https://github.com/melody-an/tensorflow-optimization/blob/r2.9/tensorflow/compiler/xla/service/tensor_splitter_v2.cc)
+* [tensorflow/compiler/xla/service/hlo\_mco.h](https://github.com/melody-an/tensorflow-optimization/blob/r2.9/tensorflow/compiler/xla/service/hlo_mco.h)
+* [tensorflow/compiler/xla/service/hlo\_mco.cc](https://github.com/melody-an/tensorflow-optimization/blob/r2.9/tensorflow/compiler/xla/service/hlo_mco.cc)
+* [tensorflow/compiler/xla/service/ reshape\_sinker.h](https://github.com/melody-an/tensorflow-optimization/blob/r2.9/tensorflow/compiler/xla/service/reshape_sinker.h)
+* [tensorflow/compiler/xla/service/reshape\_sinker.cc](https://github.com/melody-an/tensorflow-optimization/blob/r2.9/tensorflow/compiler/xla/service/reshape_sinker.cc)
+
 
 ## Installation
 Here are a simplified version of building the project form scratch:
 1. Install Bazelisk: https://www.tensorflow.org/install/source?hl=en#install_bazel
 2. git clone https://github.com/melody-an/tensorflow-optimization.git
 3. git checkout r2.9
-4. Configure compliation settings follow the instructions from https://www.tensorflow.org/install/source?hl=en#configure_the_build
+4. Configure compliation settings following the instructions from https://www.tensorflow.org/install/source?hl=en#configure_the_build
     ```bash
     ./configure
     ```
-5. Compile TensorFlow form source and build pip package
+5. Compile TensorFlow from source and build pip package
     ```bash
     TF_PIP_PATH=~/Package/tf-pip
     rm -rf $TF_PIP_PATH 
